@@ -1,10 +1,9 @@
-# ROADMAP.md — Clippy
+# ROADMAP.md — clippy
 
-This document describes the planned evolution of **clippy**, an agent operator
-tool for capturing and relaying completed AI assistant turns with minimal
-friction.
+This roadmap describes the planned evolution of **clippy** as an
+*agent operator primitive*.
 
-The roadmap is versioned by *capability*, not time.
+Versions are defined by **capability and leverage**, not time.
 
 ---
 
@@ -16,48 +15,47 @@ A completed assistant **turn** is a first-class object:
 - addressable
 - relayable independently of UI
 
-All versions must preserve this invariant.
+All future versions must preserve this invariant.
 
 ---
 
-## v0 — Terminal Turn Relay (Keystone Release)
+## v0 — Turn Relay Primitive (Keystone)
 
-**Goal**
-Eliminate friction when relaying the most recent completed assistant response
+**Goal**  
+Remove friction when relaying the most recent completed assistant response
 between interactive terminal sessions.
 
 **Scope**
 - Linux + X11
-- Konsole-specific session resolution
 - Keyboard-only workflow
-- No persistence beyond latest completed turn
+- Terminal-first
+- Single “latest completed turn” per session
 
 **Capabilities**
 - PTY wrapper per agent session
 - Deterministic detection of completed assistant turns
-- Per-session “latest completed turn” buffer
+- Per-session latest-turn buffer
 - Global relay buffer
 - Global hotkey to capture from focused session
 - Global hotkey to paste into focused session
 
-**Non-goals**
-- History
-- Search
-- tmux support
-- macOS support
-- GUI controls
-- Editor plugins
+**Non-Goals**
+- Turn history
+- Search or filtering
+- Editor integrations
+- macOS / tmux support
+- GUI surfaces
 
-**Why v0 matters**
-This version establishes the operator boundary where agent output becomes
-addressable state.
+**Why this version exists**
+v0 establishes the boundary where agent output becomes *addressable state*.
+Everything else builds on this.
 
 ---
 
 ## v1 — Local Turn Registry
 
-**Goal**
-Move from copy/paste to structured, addressable turn state.
+**Goal**  
+Promote “copy/paste” into structured, inspectable state.
 
 **New Capabilities**
 - Ring buffer of recent completed turns per session
@@ -65,48 +63,53 @@ Move from copy/paste to structured, addressable turn state.
 - Turn metadata (timestamps, truncation, interruption)
 - Multiple sinks (clipboard, file, injection)
 
-Clipboard becomes one consumer, not the model.
+Clipboard becomes a *consumer*, not the model.
 
 ---
 
 ## v2 — Resolver Abstraction
 
-**Goal**
+**Goal**  
 Support additional environments without destabilizing the core.
 
 **Changes**
-- Abstract session resolution behind pluggable resolvers
-- Konsole resolver remains reference implementation
-- Add tmux resolver (pane → PTY)
-- Add macOS Terminal/iTerm resolver
+- Introduce explicit session resolver interface
+- Terminal / environment specifics become adapters
+- Core turn detection and registry remain unchanged
 
-Core turn detection and registry remain unchanged.
+**Expected Additions**
+- tmux resolver
+- macOS terminal resolver
+
+Portability is earned after correctness.
 
 ---
 
-## v3 — Agent Routing
+## v3 — Agent Routing Layer
 
-**Goal**
-Make agent interaction composable.
+**Goal**  
+Make agent interaction composable rather than linear.
 
 **New Capabilities**
 - Explicit agent-to-agent relay paths
 - Turn templating and wrapping
-- Structured injection (review, implementation, synthesis)
+- Structured injection for review, implementation, synthesis
 
-Clipboard use becomes optional.
+At this stage, clipboard usage becomes optional.
 
 ---
 
 ## v4 — Optional Persistence & Replay
 
-**Goal**
+**Goal**  
 Enable selective memory without implicit logging.
 
 **Capabilities**
 - Explicit session snapshots
-- Replay last N turns into fresh sessions
+- Replay last N turns into new sessions
 - User-controlled persistence only
+
+No background recording. No surprise history.
 
 ---
 
@@ -116,3 +119,4 @@ Enable selective memory without implicit logging.
 - Explicit contracts over heuristics
 - Adapters over conditionals
 - Bootstrap leverage over polish
+
