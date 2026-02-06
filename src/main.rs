@@ -4,6 +4,7 @@ mod hotkey;
 #[allow(unused)]
 mod ipc;
 mod pty;
+#[allow(unused)]
 mod turn;
 
 use clap::Parser;
