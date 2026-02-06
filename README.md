@@ -34,6 +34,18 @@ clippy operates strictly at the boundary between terminal I/O and human intent.
 
 ---
 
+## Where clippy Fits
+
+clippy operates at the terminal I/O boundary — it captures live agent turns
+as they complete in a PTY session and relays them via hotkeys. This is a
+strictly lower layer than tools like [gastown](https://github.com/steveyegge/gastown) (by Steve Yegge), which manage
+structured conversation artifacts and workflows. clippy provides the raw
+capture primitive; gastown and similar systems operate on structured output
+above it. The two are complementary and non-overlapping: clippy gets the turn
+out of the terminal, higher-level tools decide what to do with it.
+
+---
+
 ## Repository Structure
 
 ```
