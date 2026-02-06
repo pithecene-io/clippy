@@ -1,0 +1,47 @@
+version: "3"
+
+tasks:
+  build:
+    desc: Build the project
+    cmds:
+      - cargo build
+
+  test:
+    desc: Run tests
+    cmds:
+      - cargo test
+
+  lint:
+    desc: Run clippy lints
+    cmds:
+      - cargo clippy -- -D warnings
+
+  check:
+    desc: Type-check without building
+    cmds:
+      - cargo check
+
+  fmt:
+    desc: Check formatting
+    cmds:
+      - cargo fmt -- --check
+
+  fmt:fix:
+    desc: Fix formatting
+    cmds:
+      - cargo fmt
+
+  run:broker:
+    desc: Run the broker daemon
+    cmds:
+      - cargo run -- broker
+
+  run:wrap:
+    desc: Run the PTY wrapper
+    cmds:
+      - cargo run -- wrap {{.CLI_ARGS}}
+
+  run:hotkey:
+    desc: Run the hotkey client
+    cmds:
+      - cargo run -- hotkey {{.CLI_ARGS}}
