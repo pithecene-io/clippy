@@ -41,4 +41,72 @@ pub enum Command {
         #[arg(long, default_value = "Super+Shift+V")]
         paste_key: String,
     },
+
+    /// CLI client for broker operations
+    Client {
+        #[command(subcommand)]
+        action: ClientAction,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ClientAction {
+    /// List all active sessions
+    #[command(name = "list-sessions")]
+    ListSessions,
+
+    /// List turns for a session
+    #[command(name = "list-turns")]
+    ListTurns {
+        /// Session ID to query
+        session: String,
+
+        /// Maximum number of turns to return
+        #[arg(long)]
+        limit: Option<u32>,
+    },
+
+    /// Get turn content and metadata by ID
+    #[command(name = "get-turn")]
+    GetTurn {
+        /// Turn ID (format: session_id:seq)
+        turn_id: String,
+
+        /// Show only metadata, omit content
+        #[arg(long)]
+        metadata_only: bool,
+    },
+
+    /// Capture latest turn from session to relay buffer
+    Capture {
+        /// Session ID
+        session: String,
+    },
+
+    /// Capture specific turn by ID to relay buffer
+    #[command(name = "capture-by-id")]
+    CaptureByID {
+        /// Turn ID (format: session_id:seq)
+        turn_id: String,
+    },
+
+    /// Paste relay buffer content to session
+    Paste {
+        /// Target session ID
+        session: String,
+    },
+
+    /// Deliver relay buffer to a sink
+    Deliver {
+        /// Sink name: clipboard, file, or inject
+        sink: String,
+
+        /// Target session ID (required for inject sink)
+        #[arg(long)]
+        session: Option<String>,
+
+        /// File path (required for file sink)
+        #[arg(long)]
+        path: Option<String>,
+    },
 }
