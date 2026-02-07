@@ -67,15 +67,21 @@ Clipboard becomes a *consumer*, not the model.
 
 ---
 
-## v2 — Resolver Abstraction
+## v2 — Resolver Abstraction ✅
 
-**Goal**  
+**Goal**
 Support additional environments without destabilizing the core.
 
 **Changes**
 - Introduce explicit session resolver interface
 - Terminal / environment specifics become adapters
 - Core turn detection and registry remain unchanged
+
+**Delivered**
+- Three independent sub-interfaces: `SessionResolver`, `HotkeyProvider`, `ClipboardProvider`
+- X11 reference adapters for all three
+- Hotkey client migrated to trait-based dispatch (platform-agnostic)
+- Broker clipboard sink abstracted via injected closure
 
 **Expected Additions**
 - tmux resolver
