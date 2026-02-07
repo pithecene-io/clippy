@@ -3,7 +3,6 @@ mod cli;
 mod hotkey;
 mod ipc;
 mod pty;
-#[allow(unused)]
 mod turn;
 
 use clap::Parser;
@@ -19,11 +18,14 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Wrap { pattern, command } => {
-            tracing::info!(?pattern, ?command, "wrap: not yet implemented");
-            eprintln!("clippyd wrap: not yet implemented");
-            std::process::exit(1);
-        }
+        Command::Wrap { pattern, command } => match pty::run_session(pattern, command).await {
+            Ok(code) => std::process::exit(code),
+            Err(e) => {
+                tracing::error!(error = %e, "wrap failed");
+                eprintln!("clippyd wrap: {e}");
+                std::process::exit(1);
+            }
+        },
         Command::Broker => {
             if let Err(e) = broker::run().await {
                 tracing::error!(error = %e, "broker failed");

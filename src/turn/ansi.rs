@@ -27,6 +27,7 @@ enum State {
 /// Returns a new `Vec<u8>` containing only the visible text content.
 /// This is a stateless convenience wrapper — each call processes a
 /// complete buffer independently.
+#[allow(dead_code)]
 pub fn strip_ansi(input: &[u8]) -> Vec<u8> {
     let mut stripper = AnsiStripper::new();
     stripper.strip(input)
