@@ -51,7 +51,27 @@ async fn main() {
             paste_key,
             clipboard_key,
         } => {
-            if let Err(e) = hotkey::run(capture_key, paste_key, clipboard_key).await {
+            // Construct X11 resolver adapters.
+            let shared = match resolver::x11::X11Shared::connect() {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!(error = %e, "X11 connect failed");
+                    eprintln!("clippyctl hotkey: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let session_resolver = resolver::x11::session::X11SessionResolver::new(&shared);
+            let mut hotkey_provider = resolver::x11::hotkey::X11HotkeyProvider::new(&shared);
+
+            if let Err(e) = hotkey::run(
+                capture_key,
+                paste_key,
+                clipboard_key,
+                &session_resolver,
+                &mut hotkey_provider,
+            )
+            .await
+            {
                 tracing::error!(error = %e, "hotkey failed");
                 eprintln!("clippyctl hotkey: {e}");
                 std::process::exit(1);

@@ -1,46 +1,42 @@
 //! Hotkey client — global key bindings and focus-based dispatch.
 //!
-//! Registers global X11 hotkeys, detects which clippy session has focus,
-//! and sends capture/paste requests to the broker daemon.
-//! See CONTRACT_HOTKEY.md.
+//! Platform-agnostic hotkey event loop. Delegates key registration to
+//! a `HotkeyProvider` and focus detection to a `SessionResolver`,
+//! both supplied via resolver trait objects.
+//! See CONTRACT_HOTKEY.md, CONTRACT_RESOLVER.md.
 
 mod broker_client;
 pub(crate) mod focus;
 pub(crate) mod keybinding;
 pub(crate) mod x11;
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use tokio::signal::unix::{SignalKind, signal as tokio_signal};
-use x11rb::protocol::Event;
 
 use broker_client::BrokerClient;
-use keybinding::{Binding, event_matches_binding, parse_binding};
-use x11::X11Context;
+
+use crate::resolver::{HotkeyEvent, HotkeyProvider, KeyBinding, ResolverError, SessionResolver};
 
 /// Hotkey client errors.
 #[derive(Debug, thiserror::Error)]
 pub enum HotkeyError {
     #[error("broker: {0}")]
     Broker(String),
+    // Dead in v2 (X11Context replaced by resolver adapters) — cleaned up in PR 4.
+    #[allow(dead_code)]
     #[error("X11: {0}")]
     X11(String),
+    // Dead in v2 (binding parsing moved into HotkeyProvider) — cleaned up in PR 4.
+    #[allow(dead_code)]
     #[error("invalid key binding: {0}")]
     InvalidBinding(String),
+    #[error("resolver: {0}")]
+    Resolver(#[from] ResolverError),
     #[error("no bindings succeeded")]
     NoBindings,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-}
-
-/// Actions triggered by hotkeys.
-#[derive(Debug, Clone, Copy)]
-enum Action {
-    Capture,
-    Paste,
-    Clipboard,
 }
 
 /// Run the hotkey client.
@@ -48,12 +44,14 @@ enum Action {
 /// This is the main entry point called from `main.rs` for the `hotkey`
 /// command. Runs until a signal is received or the broker disconnects.
 ///
+/// The hotkey client is platform-agnostic — all platform-specific
+/// behavior is delegated to the resolver trait objects.
+///
 /// # Contract compliance
 ///
 /// - Broker connection required at startup (§191-192)
-/// - X11 global key grabs via XGrabKey (§136)
-/// - NumLock/CapsLock masking (§138-139)
-/// - Focus detection: _NET_ACTIVE_WINDOW → _NET_WM_PID → /proc (§99-114)
+/// - Key registration via HotkeyProvider (CONTRACT_RESOLVER.md)
+/// - Focus detection via SessionResolver (CONTRACT_RESOLVER.md)
 /// - Action serialization (§199)
 /// - Ungrab on shutdown (§154-155)
 /// - Broker disconnect → ungrab + exit non-zero (§213-218)
@@ -61,104 +59,37 @@ pub async fn run(
     capture_key: String,
     paste_key: String,
     clipboard_key: Option<String>,
+    session_resolver: &dyn SessionResolver,
+    hotkey_provider: &mut dyn HotkeyProvider,
 ) -> Result<(), HotkeyError> {
     // 1. Connect to broker — fail hard if unreachable.
     let mut broker = BrokerClient::connect().await?;
     tracing::info!("connected to broker");
 
-    // 2. Connect to X11 display.
-    let x11 = X11Context::connect()?;
-    tracing::info!(screen = x11.screen_num(), "connected to X11 display");
+    // 2. Register hotkeys via provider.
+    let capture_binding = KeyBinding { spec: capture_key };
+    let paste_binding = KeyBinding { spec: paste_key };
+    let clipboard_binding = clipboard_key.map(|key| KeyBinding { spec: key });
 
-    // 3. Parse key bindings.
-    let capture_binding = parse_binding(&capture_key, &**x11.conn(), x11.setup())?;
-    let paste_binding = parse_binding(&paste_key, &**x11.conn(), x11.setup())?;
-
-    tracing::info!(
-        capture = %capture_binding.raw,
-        capture_keycode = capture_binding.keycode,
-        paste = %paste_binding.raw,
-        paste_keycode = paste_binding.keycode,
-        "bindings parsed"
-    );
-
-    // 4. Grab keys with NumLock/CapsLock masking.
-    let mut bindings_ok = 0u32;
-
-    match x11.grab_key(&capture_binding) {
-        Ok(true) => {
-            bindings_ok += 1;
-            tracing::info!(binding = %capture_binding.raw, "capture hotkey grabbed");
-        }
-        Ok(false) => {
-            eprintln!(
-                "warning: capture hotkey {} could not be grabbed (conflict)",
-                capture_binding.raw
-            );
-        }
-        Err(e) => {
-            tracing::error!(binding = %capture_binding.raw, error = %e, "grab failed");
-        }
-    }
-
-    match x11.grab_key(&paste_binding) {
-        Ok(true) => {
-            bindings_ok += 1;
-            tracing::info!(binding = %paste_binding.raw, "paste hotkey grabbed");
-        }
-        Ok(false) => {
-            eprintln!(
-                "warning: paste hotkey {} could not be grabbed (conflict)",
-                paste_binding.raw
-            );
-        }
-        Err(e) => {
-            tracing::error!(binding = %paste_binding.raw, error = %e, "grab failed");
-        }
-    }
-
-    let clipboard_binding = match clipboard_key {
-        Some(key) => {
-            let binding = parse_binding(&key, &**x11.conn(), x11.setup())?;
-            match x11.grab_key(&binding) {
-                Ok(true) => {
-                    bindings_ok += 1;
-                    tracing::info!(binding = %binding.raw, "clipboard hotkey grabbed");
-                }
-                Ok(false) => {
-                    eprintln!(
-                        "warning: clipboard hotkey {} could not be grabbed (conflict)",
-                        binding.raw
-                    );
-                }
-                Err(e) => {
-                    tracing::error!(binding = %binding.raw, error = %e, "grab failed");
-                }
-            }
-            Some(binding)
-        }
-        None => None,
-    };
+    let registration =
+        hotkey_provider.register(&capture_binding, &paste_binding, clipboard_binding.as_ref())?;
 
     // CONTRACT_HOTKEY.md §149-150: if no bindings succeed, exit.
-    if bindings_ok == 0 {
+    if registration.bindings_ok == 0 {
+        hotkey_provider.unregister();
         return Err(HotkeyError::NoBindings);
     }
 
-    // 5. Start X11 event thread.
-    let stop = Arc::new(AtomicBool::new(false));
-    let (mut event_rx, x11_thread) =
-        x11::spawn_event_thread(Arc::clone(x11.conn()), Arc::clone(&stop));
-
-    // 6. Install signal handlers.
+    // 3. Install signal handlers.
     let mut sig_term = tokio_signal(SignalKind::terminate())?;
     let mut sig_int = tokio_signal(SignalKind::interrupt())?;
 
     tracing::info!("hotkey client running — press Ctrl+C to stop");
 
-    // 7. Main select! loop.
+    // 4. Main select! loop.
     let mut broker_disconnected = false;
-    let mut x11_thread_died = false;
+    let mut event_thread_died = false;
+    let mut event_rx = registration.events;
 
     // Periodic broker health check — detect disconnect while idle
     // (CONTRACT_HOTKEY.md §213-218).
@@ -171,16 +102,14 @@ pub async fn run(
         tokio::select! {
             event = event_rx.recv() => {
                 let Some(event) = event else {
-                    // Channel closed — X11 event thread exited.
-                    tracing::error!("X11 event thread died — shutting down");
-                    eprintln!("error: X11 event thread exited unexpectedly");
-                    x11_thread_died = true;
+                    // Channel closed — event thread exited.
+                    tracing::error!("hotkey event thread died — shutting down");
+                    eprintln!("error: hotkey event thread exited unexpectedly");
+                    event_thread_died = true;
                     break;
                 };
 
-                if let Some(action) = classify_event(&event, &capture_binding, &paste_binding, clipboard_binding.as_ref(), x11.numlock_mask())
-                    && let Err(e) = dispatch_action(action, &x11, &mut broker).await
-                {
+                if let Err(e) = dispatch_action(event, session_resolver, &mut broker).await {
                     // Check if this is a broker disconnect.
                     if is_broker_error(&e) {
                         tracing::error!(error = %e, "broker disconnected — shutting down");
@@ -220,77 +149,27 @@ pub async fn run(
         }
     }
 
-    // 8. Cleanup.
-    // Stop X11 event thread.
-    stop.store(true, Ordering::Relaxed);
-
-    // Ungrab all registered hotkeys (CONTRACT_HOTKEY.md §154-155).
-    x11.ungrab_key(&capture_binding);
-    x11.ungrab_key(&paste_binding);
-    if let Some(binding) = &clipboard_binding {
-        x11.ungrab_key(binding);
-    }
-
-    // Wait for X11 thread to exit (will exit within 100ms due to poll timeout).
-    if let Err(e) = x11_thread.join() {
-        tracing::warn!("X11 event thread panicked: {e:?}");
-    }
+    // 5. Cleanup — release all key grabs (CONTRACT_HOTKEY.md §154-155).
+    hotkey_provider.unregister();
 
     tracing::info!("hotkey client stopped");
 
-    if broker_disconnected || x11_thread_died {
+    if broker_disconnected || event_thread_died {
         // CONTRACT_HOTKEY.md §215: exit with non-zero on broker disconnect.
-        // Also exit non-zero if X11 thread died — client is non-functional.
+        // Also exit non-zero if event thread died — client is non-functional.
         std::process::exit(1);
     }
 
     Ok(())
 }
 
-/// Classify an X11 event as a hotkey action, or `None` if not a hotkey.
-fn classify_event(
-    event: &Event,
-    capture_binding: &Binding,
-    paste_binding: &Binding,
-    clipboard_binding: Option<&Binding>,
-    numlock_mask: u16,
-) -> Option<Action> {
-    // We only care about KeyPress events.
-    let key_event = match event {
-        Event::KeyPress(e) => e,
-        _ => return None,
-    };
-
-    let keycode = key_event.detail;
-    let state = u16::from(key_event.state);
-
-    if event_matches_binding(keycode, state, capture_binding, numlock_mask) {
-        Some(Action::Capture)
-    } else if event_matches_binding(keycode, state, paste_binding, numlock_mask) {
-        Some(Action::Paste)
-    } else if let Some(binding) = clipboard_binding {
-        if event_matches_binding(keycode, state, binding, numlock_mask) {
-            Some(Action::Clipboard)
-        } else {
-            None
-        }
-    } else {
-        None
-    }
-}
-
-/// Dispatch an action: resolve focused session, send request to broker.
+/// Dispatch a hotkey event: resolve focused session, send request to broker.
 async fn dispatch_action(
-    action: Action,
-    x11: &X11Context,
+    event: HotkeyEvent,
+    session_resolver: &dyn SessionResolver,
     broker: &mut BrokerClient,
 ) -> Result<(), HotkeyError> {
-    // 1. Query active window PID from X11.
-    let window_pid = x11
-        .get_active_window_pid()?
-        .ok_or_else(|| HotkeyError::X11("no PID on focused window".into()))?;
-
-    // 2. List sessions from broker.
+    // 1. List sessions from broker.
     let sessions = broker.list_sessions().await?;
 
     if sessions.is_empty() {
@@ -298,23 +177,24 @@ async fn dispatch_action(
         return Ok(());
     }
 
-    // 3. Resolve focused session via process tree walk.
-    let session_id = focus::resolve_session(window_pid, &sessions)
-        .map_err(|e| HotkeyError::X11(format!("focus resolution: {e}")))?;
+    // 2. Resolve focused session via resolver.
+    let session_id = session_resolver
+        .focused_session(&sessions)?
+        .ok_or_else(|| ResolverError::Session("no clippy session in focused window".into()))?;
 
-    // 4. Send action to broker.
-    match action {
-        Action::Capture => {
+    // 3. Send action to broker.
+    match event {
+        HotkeyEvent::Capture => {
             let size = broker.capture(&session_id).await?;
             tracing::info!(session = %session_id, size, "captured");
             eprintln!("captured {size} bytes from session {session_id}");
         }
-        Action::Paste => {
+        HotkeyEvent::Paste => {
             broker.paste(&session_id).await?;
             tracing::info!(session = %session_id, "pasted");
             eprintln!("pasted to session {session_id}");
         }
-        Action::Clipboard => {
+        HotkeyEvent::Clipboard => {
             let size = broker.capture(&session_id).await?;
             broker.deliver_clipboard().await?;
             tracing::info!(session = %session_id, size, "captured to clipboard");

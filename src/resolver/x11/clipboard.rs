@@ -12,8 +12,11 @@ use std::process::{Command, Stdio};
 use crate::resolver::{ClipboardProvider, ResolverError};
 
 /// X11 implementation of `ClipboardProvider` via `xclip`.
+// Wired into broker sink in PR 4.
+#[allow(dead_code)]
 pub struct X11ClipboardProvider;
 
+#[allow(dead_code)]
 impl X11ClipboardProvider {
     /// Create a new X11 clipboard provider.
     pub fn new() -> Self {

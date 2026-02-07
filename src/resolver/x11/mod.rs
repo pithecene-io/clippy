@@ -27,6 +27,7 @@ pub struct X11Shared {
     /// Shared X11 connection.
     pub conn: Arc<RustConnection>,
     /// Screen number (from `RustConnection::connect`).
+    #[allow(dead_code)]
     pub screen_num: usize,
     /// Root window of the default screen.
     pub root: Window,

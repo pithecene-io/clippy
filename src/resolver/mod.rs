@@ -6,16 +6,18 @@
 //!
 //! See CONTRACT_RESOLVER.md.
 
-// Trait definitions and types — no consumers until X11 adapters land.
-#![allow(dead_code, unused_imports)]
-
 pub mod clipboard;
 pub mod hotkey;
 pub mod session;
 pub mod x11;
 
+// ClipboardProvider wired into broker sink in PR 4.
+#[allow(unused_imports)]
 pub use clipboard::ClipboardProvider;
-pub use hotkey::{HotkeyEvent, HotkeyProvider, HotkeyRegistration, KeyBinding};
+pub use hotkey::{HotkeyEvent, HotkeyProvider, KeyBinding};
+// HotkeyRegistration used internally by HotkeyProvider impls.
+#[allow(unused_imports)]
+pub use hotkey::HotkeyRegistration;
 pub use session::SessionResolver;
 
 /// Errors returned by resolver adapters.
@@ -32,6 +34,8 @@ pub enum ResolverError {
     Hotkey(String),
 
     /// Clipboard operation failed (e.g. xclip not found, pipe error).
+    // Wired into broker sink in PR 4.
+    #[allow(dead_code)]
     #[error("clipboard: {0}")]
     Clipboard(String),
 }
@@ -41,6 +45,8 @@ pub enum ResolverError {
 /// Constructed at startup and passed to the hotkey client (and eventually
 /// the broker's clipboard sink). Only one adapter per sub-interface is
 /// active at runtime.
+// Used when all three adapters are composed together (PR 4+).
+#[allow(dead_code)]
 pub struct ResolverSet {
     /// Resolves which clippy session has focus.
     pub session: Box<dyn SessionResolver>,

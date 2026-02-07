@@ -26,7 +26,6 @@ use crate::resolver::hotkey::{HotkeyEvent, HotkeyRegistration, KeyBinding};
 /// `HotkeyEvent` values on the returned channel.
 pub struct X11HotkeyProvider {
     conn: Arc<RustConnection>,
-    screen_num: usize,
     root: Window,
     numlock_mask: u16,
 
@@ -45,7 +44,6 @@ impl X11HotkeyProvider {
     pub fn new(shared: &super::X11Shared) -> Self {
         Self {
             conn: Arc::clone(&shared.conn),
-            screen_num: shared.screen_num,
             root: shared.root,
             numlock_mask: shared.numlock_mask,
             bindings: Vec::new(),

@@ -24,12 +24,16 @@ pub(crate) const LOCK_MASK: u16 = 0x0002;
 const XK_NUM_LOCK: Keysym = 0xff7f;
 
 /// Pre-interned X11 atoms for property queries.
+// Dead in v2 (replaced by X11Shared) — cleaned up in PR 4.
+#[allow(dead_code)]
 pub(crate) struct Atoms {
     pub(crate) net_active_window: Atom,
     pub(crate) net_wm_pid: Atom,
 }
 
 /// X11 connection context for the hotkey client.
+// Dead in v2 (replaced by X11Shared + resolver adapters) — cleaned up in PR 4.
+#[allow(dead_code)]
 pub struct X11Context {
     pub(crate) conn: Arc<RustConnection>,
     pub(crate) screen_num: usize,
@@ -38,6 +42,7 @@ pub struct X11Context {
     pub(crate) numlock_mask: u16,
 }
 
+#[allow(dead_code)]
 impl X11Context {
     /// Connect to the X11 display and intern required atoms.
     pub fn connect() -> Result<Self, HotkeyError> {
