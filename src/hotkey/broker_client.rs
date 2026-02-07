@@ -141,6 +141,35 @@ impl BrokerClient {
         }
     }
 
+    /// Deliver relay buffer content to the clipboard sink.
+    pub async fn deliver_clipboard(&mut self) -> Result<(), HotkeyError> {
+        let id = self.next_id;
+        self.next_id += 1;
+
+        self.framed
+            .send(Message::Deliver {
+                id,
+                sink: "clipboard".into(),
+                session: None,
+                path: None,
+            })
+            .await
+            .map_err(|e| HotkeyError::Broker(format!("send deliver_clipboard: {e}")))?;
+
+        match self.framed.next().await {
+            Some(Ok(Message::Response {
+                status: Status::Ok, ..
+            })) => Ok(()),
+            Some(Ok(Message::Response { error, .. })) => Err(HotkeyError::Broker(format!(
+                "deliver_clipboard failed: {}",
+                error.unwrap_or_default()
+            ))),
+            other => Err(HotkeyError::Broker(format!(
+                "unexpected deliver_clipboard response: {other:?}"
+            ))),
+        }
+    }
+
     /// Paste relay buffer content to a session (inject into its PTY).
     pub async fn paste(&mut self, session: &str) -> Result<(), HotkeyError> {
         let id = self.next_id;
