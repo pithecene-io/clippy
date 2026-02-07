@@ -1,7 +1,6 @@
 mod broker;
 mod cli;
 mod hotkey;
-#[allow(unused)]
 mod ipc;
 mod pty;
 #[allow(unused)]
@@ -11,7 +10,8 @@ use clap::Parser;
 use cli::{Cli, Command};
 use tracing_subscriber::EnvFilter;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
@@ -25,9 +25,11 @@ fn main() {
             std::process::exit(1);
         }
         Command::Broker => {
-            tracing::info!("broker: not yet implemented");
-            eprintln!("clippyd broker: not yet implemented");
-            std::process::exit(1);
+            if let Err(e) = broker::run().await {
+                tracing::error!(error = %e, "broker failed");
+                eprintln!("clippyd broker: {e}");
+                std::process::exit(1);
+            }
         }
         Command::Hotkey {
             capture_key,

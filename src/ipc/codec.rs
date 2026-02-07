@@ -7,7 +7,7 @@
 use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 
-use super::protocol::{MAX_PAYLOAD_SIZE, Message};
+use super::protocol::{MAX_PAYLOAD_SIZE, Message, RawEnvelope};
 
 /// Codec error type.
 #[derive(Debug, thiserror::Error)]
@@ -28,12 +28,18 @@ pub enum CodecError {
 /// Decodes length-prefixed frames back into [`Message`] values.
 ///
 /// Enforces the 16 MiB maximum payload size from CONTRACT_BROKER.md.
+///
+/// Used by client code (PTY wrappers, hotkey clients) for simple
+/// send/receive. The broker itself uses [`FrameCodec`] + [`decode_frame`]
+/// for two-phase decode with unknown-type fallback.
+#[allow(dead_code)]
 #[derive(Debug, Default)]
 pub struct LengthPrefixedCodec {
     /// Length of the current frame being read, if the header has been consumed.
     pending_len: Option<usize>,
 }
 
+#[allow(dead_code)]
 impl LengthPrefixedCodec {
     pub fn new() -> Self {
         Self { pending_len: None }
@@ -92,6 +98,95 @@ impl Encoder<Message> for LengthPrefixedCodec {
         dst.put_u32(payload.len() as u32);
         dst.extend_from_slice(&payload);
         Ok(())
+    }
+}
+
+/// Frame-level codec — handles only length-prefixed framing.
+///
+/// Returns raw `BytesMut` payloads without deserializing. Used by the
+/// connection layer for two-phase decode: try [`Message`], then fall
+/// back to [`RawEnvelope`] for unknown-type error responses.
+#[derive(Debug, Default)]
+pub struct FrameCodec {
+    /// Length of the current frame being read, if the header has been consumed.
+    pending_len: Option<usize>,
+}
+
+impl FrameCodec {
+    pub fn new() -> Self {
+        Self { pending_len: None }
+    }
+}
+
+impl Decoder for FrameCodec {
+    type Item = BytesMut;
+    type Error = CodecError;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        let payload_len = match self.pending_len {
+            Some(len) => len,
+            None => {
+                if src.len() < 4 {
+                    return Ok(None);
+                }
+                let len = src.get_u32() as usize;
+                if len > MAX_PAYLOAD_SIZE {
+                    return Err(CodecError::PayloadTooLarge(len));
+                }
+                self.pending_len = Some(len);
+                len
+            }
+        };
+
+        if src.len() < payload_len {
+            src.reserve(payload_len - src.len());
+            return Ok(None);
+        }
+
+        let payload = src.split_to(payload_len);
+        self.pending_len = None;
+        Ok(Some(payload))
+    }
+}
+
+impl Encoder<Message> for FrameCodec {
+    type Error = CodecError;
+
+    fn encode(&mut self, item: Message, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        let payload = rmp_serde::to_vec_named(&item)?;
+        if payload.len() > MAX_PAYLOAD_SIZE {
+            return Err(CodecError::PayloadTooLarge(payload.len()));
+        }
+        dst.reserve(4 + payload.len());
+        dst.put_u32(payload.len() as u32);
+        dst.extend_from_slice(&payload);
+        Ok(())
+    }
+}
+
+/// Result of attempting to decode a raw frame into a protocol message.
+#[derive(Debug)]
+pub enum DecodeResult {
+    /// Successfully decoded a known message variant.
+    Ok(Message),
+    /// Unknown type — extracted envelope for error response echoing.
+    UnknownType(RawEnvelope),
+    /// Completely malformed — could not even extract `{type, id}`.
+    Malformed(rmp_serde::decode::Error),
+}
+
+/// Attempt two-phase decode of a raw frame.
+///
+/// 1. Try to deserialize as [`Message`] (known variant).
+/// 2. On failure, try [`RawEnvelope`] to extract `{type, id}`.
+/// 3. If both fail, return [`DecodeResult::Malformed`].
+pub fn decode_frame(payload: &[u8]) -> DecodeResult {
+    match rmp_serde::from_slice::<Message>(payload) {
+        Ok(msg) => DecodeResult::Ok(msg),
+        Err(_) => match rmp_serde::from_slice::<RawEnvelope>(payload) {
+            Ok(envelope) => DecodeResult::UnknownType(envelope),
+            Err(e) => DecodeResult::Malformed(e),
+        },
     }
 }
 
