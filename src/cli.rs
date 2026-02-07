@@ -1,7 +1,7 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "clippyd", about = "Keyboard-driven agent turn relay")]
+#[command(name = "clippyctl", about = "Keyboard-driven agent turn relay")]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Command,
