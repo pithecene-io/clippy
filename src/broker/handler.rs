@@ -8,7 +8,7 @@
 
 use crate::ipc::protocol::{Message, PROTOCOL_VERSION, Role, Status, TurnDescriptor};
 
-use super::state::{BrokerState, ConnectionId};
+use super::state::{BrokerState, ConnectionId, SinkMetadata};
 
 /// An inject command that the broker loop must send to a wrapper.
 ///
@@ -30,13 +30,21 @@ pub struct InjectAction {
 #[derive(Debug)]
 pub enum SideEffect {
     /// Route content to a wrapper's PTY (existing paste behavior).
-    Inject(InjectAction),
+    Inject {
+        action: InjectAction,
+        request_id: u32,
+    },
     /// Write relay buffer content to X11 clipboard.
-    Clipboard { content: Vec<u8>, request_id: u32 },
+    Clipboard {
+        content: Vec<u8>,
+        metadata: SinkMetadata,
+        request_id: u32,
+    },
     /// Write relay buffer content to a file.
     FileWrite {
         path: String,
         content: Vec<u8>,
+        metadata: SinkMetadata,
         request_id: u32,
     },
 }
@@ -239,11 +247,17 @@ fn handle_capture(state: &mut BrokerState, id: u32, session: &str) -> Message {
 fn handle_paste(state: &mut BrokerState, id: u32, session: &str) -> (Message, Option<SideEffect>) {
     match state.paste_content(session) {
         Ok((content, target_conn)) => {
-            let inject = InjectAction {
+            let action = InjectAction {
                 target_connection: target_conn,
                 message: Message::Inject { id: 0, content },
             };
-            (ok_response(id), Some(SideEffect::Inject(inject)))
+            (
+                ok_response(id),
+                Some(SideEffect::Inject {
+                    action,
+                    request_id: id,
+                }),
+            )
         }
         Err(reason) => (error_response(id, reason), None),
     }
@@ -356,14 +370,15 @@ fn handle_deliver(
             handle_paste(state, id, session)
         }
         "clipboard" => {
-            let content = match state.relay_content() {
-                Some(c) => c,
+            let (content, metadata) = match state.relay_content() {
+                Some(pair) => pair,
                 None => return (error_response(id, "buffer_empty"), None),
             };
             (
                 ok_response(id),
                 Some(SideEffect::Clipboard {
                     content,
+                    metadata,
                     request_id: id,
                 }),
             )
@@ -373,8 +388,8 @@ fn handle_deliver(
                 Some(p) => p,
                 None => return (error_response(id, "missing_field"), None),
             };
-            let content = match state.relay_content() {
-                Some(c) => c,
+            let (content, metadata) = match state.relay_content() {
+                Some(pair) => pair,
                 None => return (error_response(id, "buffer_empty"), None),
             };
             (
@@ -382,6 +397,7 @@ fn handle_deliver(
                 Some(SideEffect::FileWrite {
                     path: path.to_string(),
                     content,
+                    metadata,
                     request_id: id,
                 }),
             )
@@ -775,7 +791,8 @@ mod tests {
         ));
         let effect = inject.expect("paste should produce SideEffect");
         match effect {
-            SideEffect::Inject(action) => {
+            SideEffect::Inject { action, request_id } => {
+                assert_eq!(request_id, 4);
                 assert_eq!(action.target_connection, c1);
                 match action.message {
                     Message::Inject { id, content } => {
@@ -1359,7 +1376,7 @@ mod tests {
         ));
         let effect = inject.expect("paste should produce SideEffect");
         match effect {
-            SideEffect::Inject(action) => match action.message {
+            SideEffect::Inject { action, .. } => match action.message {
                 Message::Inject { content, .. } => {
                     assert_eq!(content, b"first");
                 }
@@ -1512,7 +1529,8 @@ mod tests {
             }
         ));
         match effect.expect("should produce SideEffect") {
-            SideEffect::Inject(action) => {
+            SideEffect::Inject { action, request_id } => {
+                assert_eq!(request_id, 10);
                 assert_eq!(action.target_connection, c1);
                 match action.message {
                     Message::Inject { content, .. } => {
@@ -1570,10 +1588,15 @@ mod tests {
         match effect.expect("should produce SideEffect") {
             SideEffect::Clipboard {
                 content,
+                metadata,
                 request_id,
             } => {
                 assert_eq!(content, b"turn data");
                 assert_eq!(request_id, 10);
+                assert_eq!(metadata.turn_id, "s1:1");
+                assert_eq!(metadata.timestamp, 1000);
+                assert_eq!(metadata.byte_length, 9);
+                assert!(!metadata.interrupted);
             }
             _ => panic!("expected SideEffect::Clipboard"),
         }
@@ -1626,11 +1649,16 @@ mod tests {
             SideEffect::FileWrite {
                 path,
                 content,
+                metadata,
                 request_id,
             } => {
                 assert_eq!(path, "/tmp/turn.txt");
                 assert_eq!(content, b"turn data");
                 assert_eq!(request_id, 10);
+                assert_eq!(metadata.turn_id, "s1:1");
+                assert_eq!(metadata.timestamp, 1000);
+                assert_eq!(metadata.byte_length, 9);
+                assert!(!metadata.interrupted);
             }
             _ => panic!("expected SideEffect::FileWrite"),
         }

@@ -112,16 +112,18 @@ pub async fn run(config: state::RingConfig) -> Result<(), BrokerError> {
                 // Execute side effects before sending the response.
                 if let Some(effect) = side_effect {
                     match effect {
-                        SideEffect::Inject(action) => {
-                            dispatch_inject(&inject_senders, action);
+                        SideEffect::Inject { action, request_id } => {
+                            if !dispatch_inject(&inject_senders, action) {
+                                response = handler::error_response(request_id, "session_disconnected");
+                            }
                         }
-                        SideEffect::Clipboard { content, request_id } => {
-                            if let Err(reason) = sink::deliver_clipboard(&content).await {
+                        SideEffect::Clipboard { content, metadata, request_id } => {
+                            if let Err(reason) = sink::deliver_clipboard(&content, &metadata).await {
                                 response = handler::error_response(request_id, &reason);
                             }
                         }
-                        SideEffect::FileWrite { path, content, request_id } => {
-                            if let Err(reason) = sink::deliver_file(&path, &content).await {
+                        SideEffect::FileWrite { path, content, metadata, request_id } => {
+                            if let Err(reason) = sink::deliver_file(&path, &content, &metadata).await {
                                 response = handler::error_response(request_id, &reason);
                             }
                         }
@@ -184,23 +186,30 @@ fn accept_connection(
 }
 
 /// Route an inject command to the target wrapper's connection task.
+///
+/// Returns `true` if the inject was successfully queued, `false` if the
+/// target connection is missing or its channel is closed (wrapper
+/// disconnected). The caller overrides the response with
+/// `"session_disconnected"` on failure per CONTRACT_BROKER.md §313.
 fn dispatch_inject(
     inject_senders: &HashMap<ConnectionId, mpsc::UnboundedSender<Message>>,
     action: InjectAction,
-) {
+) -> bool {
     if let Some(tx) = inject_senders.get(&action.target_connection) {
-        if tx.send(action.message).is_err() {
-            tracing::warn!(
-                conn_id = ?action.target_connection,
-                "inject send failed — wrapper disconnected"
-            );
+        if tx.send(action.message).is_ok() {
+            return true;
         }
+        tracing::warn!(
+            conn_id = ?action.target_connection,
+            "inject send failed — wrapper disconnected"
+        );
     } else {
         tracing::warn!(
             conn_id = ?action.target_connection,
             "inject target not found"
         );
     }
+    false
 }
 
 // -- Socket setup --
@@ -318,16 +327,18 @@ mod tests {
                             );
                         if let Some(effect) = side_effect {
                             match effect {
-                                SideEffect::Inject(action) => {
-                                    dispatch_inject(&inject_senders, action);
+                                SideEffect::Inject { action, request_id } => {
+                                    if !dispatch_inject(&inject_senders, action) {
+                                        response = handler::error_response(request_id, "session_disconnected");
+                                    }
                                 }
-                                SideEffect::Clipboard { content, request_id } => {
-                                    if let Err(reason) = sink::deliver_clipboard(&content).await {
+                                SideEffect::Clipboard { content, metadata, request_id } => {
+                                    if let Err(reason) = sink::deliver_clipboard(&content, &metadata).await {
                                         response = handler::error_response(request_id, &reason);
                                     }
                                 }
-                                SideEffect::FileWrite { path, content, request_id } => {
-                                    if let Err(reason) = sink::deliver_file(&path, &content).await {
+                                SideEffect::FileWrite { path, content, metadata, request_id } => {
+                                    if let Err(reason) = sink::deliver_file(&path, &content, &metadata).await {
                                         response = handler::error_response(request_id, &reason);
                                     }
                                 }
@@ -1148,5 +1159,39 @@ mod tests {
         // Verify file was written.
         let written = tokio::fs::read(&output_path).await.unwrap();
         assert_eq!(written, b"file sink content");
+    }
+
+    // -- dispatch_inject unit tests --
+
+    #[test]
+    fn dispatch_inject_dropped_receiver() {
+        let conn = ConnectionId::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx); // Simulate wrapper task gone.
+
+        let mut senders = HashMap::new();
+        senders.insert(conn, tx);
+
+        let action = InjectAction {
+            target_connection: conn,
+            message: Message::Inject {
+                id: 0,
+                content: b"data".to_vec(),
+            },
+        };
+        assert!(!dispatch_inject(&senders, action));
+    }
+
+    #[test]
+    fn dispatch_inject_missing_target() {
+        let senders: HashMap<ConnectionId, mpsc::UnboundedSender<Message>> = HashMap::new();
+        let action = InjectAction {
+            target_connection: ConnectionId::new(),
+            message: Message::Inject {
+                id: 0,
+                content: b"data".to_vec(),
+            },
+        };
+        assert!(!dispatch_inject(&senders, action));
     }
 }

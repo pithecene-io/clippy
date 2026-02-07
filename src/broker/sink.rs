@@ -5,13 +5,20 @@
 //!
 //! Both are best-effort per CONTRACT_REGISTRY.md §328–329. On failure
 //! the broker loop replaces the optimistic ok response with an error.
+//!
+//! CONTRACT_REGISTRY.md §266: every sink receives `(content, metadata)`.
+
+use super::state::SinkMetadata;
 
 /// Write content to the X11 clipboard via `xclip`.
 ///
 /// Spawns `xclip -selection clipboard`, pipes `content` to stdin, and
 /// waits for exit. Returns `Err("clipboard_failed")` on non-zero exit
 /// or if xclip is not found.
-pub async fn deliver_clipboard(content: &[u8]) -> Result<(), String> {
+///
+/// `metadata` is accepted per CONTRACT_REGISTRY.md §266 but unused
+/// by the clipboard sink in v1.
+pub async fn deliver_clipboard(content: &[u8], _metadata: &SinkMetadata) -> Result<(), String> {
     use tokio::process::Command;
 
     let mut child = Command::new("xclip")
@@ -47,7 +54,14 @@ pub async fn deliver_clipboard(content: &[u8]) -> Result<(), String> {
 ///
 /// Uses `tokio::fs::write` for async I/O. Returns `Err("file_write_failed")`
 /// on any I/O error.
-pub async fn deliver_file(path: &str, content: &[u8]) -> Result<(), String> {
+///
+/// `metadata` is accepted per CONTRACT_REGISTRY.md §266 but unused
+/// by the file sink in v1.
+pub async fn deliver_file(
+    path: &str,
+    content: &[u8],
+    _metadata: &SinkMetadata,
+) -> Result<(), String> {
     tokio::fs::write(path, content)
         .await
         .map_err(|_| "file_write_failed".to_string())
@@ -57,13 +71,25 @@ pub async fn deliver_file(path: &str, content: &[u8]) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn dummy_metadata() -> SinkMetadata {
+        SinkMetadata {
+            turn_id: "s1:1".into(),
+            timestamp: 1000,
+            byte_length: 15,
+            interrupted: false,
+            truncated: false,
+        }
+    }
+
     #[tokio::test]
     async fn file_write_success() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("output.txt");
         let content = b"hello from sink";
 
-        deliver_file(path.to_str().unwrap(), content).await.unwrap();
+        deliver_file(path.to_str().unwrap(), content, &dummy_metadata())
+            .await
+            .unwrap();
 
         let written = tokio::fs::read(&path).await.unwrap();
         assert_eq!(written, content);
@@ -71,7 +97,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_write_bad_path() {
-        let result = deliver_file("/nonexistent/dir/file.txt", b"data").await;
+        let result = deliver_file("/nonexistent/dir/file.txt", b"data", &dummy_metadata()).await;
         assert_eq!(result, Err("file_write_failed".to_string()));
     }
 }

@@ -29,12 +29,25 @@ impl Default for RingConfig {
     }
 }
 
-/// Relay buffer entry — captured turn content with its turn ID.
+/// Turn metadata passed to sinks per CONTRACT_REGISTRY.md §266.
+///
+/// All fields are public and part of the sink interface contract.
+/// v1 sinks do not consume these, but the interface must carry them.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct SinkMetadata {
+    pub turn_id: String,
+    pub timestamp: u64,
+    pub byte_length: u32,
+    pub interrupted: bool,
+    pub truncated: bool,
+}
+
+/// Relay buffer entry — captured turn content with metadata.
 #[derive(Debug)]
 struct RelayEntry {
-    #[allow(dead_code)]
-    turn_id: String,
     content: Vec<u8>,
+    metadata: SinkMetadata,
 }
 
 /// Result of a capture operation.
@@ -185,8 +198,14 @@ impl BrokerState {
         let size = head.content.len() as u32;
         let turn_id = head.turn_id.clone();
         self.relay_buffer = Some(RelayEntry {
-            turn_id: turn_id.clone(),
             content: head.content.clone(),
+            metadata: SinkMetadata {
+                turn_id: turn_id.clone(),
+                timestamp: head.timestamp,
+                byte_length: head.byte_length,
+                interrupted: head.interrupted,
+                truncated: head.truncated,
+            },
         });
         Ok(CaptureResult { size, turn_id })
     }
@@ -206,13 +225,17 @@ impl BrokerState {
         Ok((content, entry.connection_id))
     }
 
-    /// Read a clone of the relay buffer content, if present.
+    /// Read a clone of the relay buffer content and metadata, if present.
     ///
     /// Used by non-inject sinks (clipboard, file) that need the
-    /// content without session routing. Returns `None` if no turn
-    /// has been captured yet.
-    pub fn relay_content(&self) -> Option<Vec<u8>> {
-        self.relay_buffer.as_ref().map(|r| r.content.clone())
+    /// content and metadata without session routing. Returns `None`
+    /// if no turn has been captured yet.
+    ///
+    /// CONTRACT_REGISTRY.md §266: sinks receive `(content, metadata)`.
+    pub fn relay_content(&self) -> Option<(Vec<u8>, SinkMetadata)> {
+        self.relay_buffer
+            .as_ref()
+            .map(|r| (r.content.clone(), r.metadata.clone()))
     }
 
     /// List all active sessions.
@@ -267,8 +290,14 @@ impl BrokerState {
         let size = record.content.len() as u32;
         let turn_id = record.turn_id.clone();
         self.relay_buffer = Some(RelayEntry {
-            turn_id: turn_id.clone(),
             content: record.content.clone(),
+            metadata: SinkMetadata {
+                turn_id: turn_id.clone(),
+                timestamp: record.timestamp,
+                byte_length: record.byte_length,
+                interrupted: record.interrupted,
+                truncated: record.truncated,
+            },
         });
         Ok(CaptureResult { size, turn_id })
     }
@@ -538,8 +567,14 @@ mod tests {
     fn paste_session_not_found() {
         let mut s = state();
         s.relay_buffer = Some(RelayEntry {
-            turn_id: "x:1".into(),
             content: b"data".to_vec(),
+            metadata: SinkMetadata {
+                turn_id: "x:1".into(),
+                timestamp: 1000,
+                byte_length: 4,
+                interrupted: false,
+                truncated: false,
+            },
         });
         assert_eq!(s.paste_content("nonexistent"), Err("session_not_found"));
     }
@@ -707,16 +742,23 @@ mod tests {
         assert_eq!(s.capture_by_id("nonexistent:1"), Err("turn_not_found"));
     }
 
-    // -- Relay stores turn_id --
+    // -- Relay stores metadata --
 
     #[test]
-    fn relay_buffer_stores_turn_id() {
+    fn relay_buffer_stores_metadata() {
         let mut s = state();
         let c = conn();
         s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
-        s.store_turn("s1", b"data".to_vec(), false, 1000).unwrap();
+        s.store_turn("s1", b"data".to_vec(), true, 5000).unwrap();
         s.capture("s1").unwrap();
-        assert_eq!(s.relay_buffer.as_ref().unwrap().turn_id, "s1:1");
+
+        let (content, metadata) = s.relay_content().unwrap();
+        assert_eq!(content, b"data");
+        assert_eq!(metadata.turn_id, "s1:1");
+        assert_eq!(metadata.timestamp, 5000);
+        assert_eq!(metadata.byte_length, 4);
+        assert!(metadata.interrupted);
+        assert!(!metadata.truncated);
     }
 }
