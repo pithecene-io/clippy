@@ -11,6 +11,7 @@ mod x11;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use tokio::signal::unix::{SignalKind, signal as tokio_signal};
 use x11rb::protocol::Event;
@@ -129,11 +130,27 @@ pub async fn run(capture_key: String, paste_key: String) -> Result<(), HotkeyErr
 
     // 7. Main select! loop.
     let mut broker_disconnected = false;
+    let mut x11_thread_died = false;
+
+    // Periodic broker health check — detect disconnect while idle
+    // (CONTRACT_HOTKEY.md §213-218).
+    let mut health_check = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
 
     loop {
         tokio::select! {
-            Some(event) = event_rx.recv() => {
-                if let Some(action) = classify_event(&event, &capture_binding, &paste_binding)
+            event = event_rx.recv() => {
+                let Some(event) = event else {
+                    // Channel closed — X11 event thread exited.
+                    tracing::error!("X11 event thread died — shutting down");
+                    eprintln!("error: X11 event thread exited unexpectedly");
+                    x11_thread_died = true;
+                    break;
+                };
+
+                if let Some(action) = classify_event(&event, &capture_binding, &paste_binding, x11.numlock_mask())
                     && let Err(e) = dispatch_action(action, &x11, &mut broker).await
                 {
                     // Check if this is a broker disconnect.
@@ -146,6 +163,20 @@ pub async fn run(capture_key: String, paste_key: String) -> Result<(), HotkeyErr
                     // Non-fatal action error — log and continue.
                     tracing::warn!(error = %e, "action failed");
                     eprintln!("error: {e}");
+                }
+            }
+
+            _ = health_check.tick() => {
+                // Periodic broker liveness probe — detect disconnect
+                // while idle (CONTRACT_HOTKEY.md §213-218).
+                if let Err(e) = broker.list_sessions().await {
+                    if is_broker_error(&e) {
+                        tracing::error!(error = %e, "broker health check failed — shutting down");
+                        eprintln!("error: broker disconnected");
+                        broker_disconnected = true;
+                        break;
+                    }
+                    tracing::warn!(error = %e, "broker health check returned error");
                 }
             }
 
@@ -176,8 +207,9 @@ pub async fn run(capture_key: String, paste_key: String) -> Result<(), HotkeyErr
 
     tracing::info!("hotkey client stopped");
 
-    if broker_disconnected {
+    if broker_disconnected || x11_thread_died {
         // CONTRACT_HOTKEY.md §215: exit with non-zero on broker disconnect.
+        // Also exit non-zero if X11 thread died — client is non-functional.
         std::process::exit(1);
     }
 
@@ -189,6 +221,7 @@ fn classify_event(
     event: &Event,
     capture_binding: &Binding,
     paste_binding: &Binding,
+    numlock_mask: u16,
 ) -> Option<Action> {
     // We only care about KeyPress events.
     let key_event = match event {
@@ -199,9 +232,9 @@ fn classify_event(
     let keycode = key_event.detail;
     let state = u16::from(key_event.state);
 
-    if event_matches_binding(keycode, state, capture_binding) {
+    if event_matches_binding(keycode, state, capture_binding, numlock_mask) {
         Some(Action::Capture)
-    } else if event_matches_binding(keycode, state, paste_binding) {
+    } else if event_matches_binding(keycode, state, paste_binding, numlock_mask) {
         Some(Action::Paste)
     } else {
         None

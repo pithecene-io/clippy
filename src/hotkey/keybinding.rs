@@ -174,12 +174,19 @@ fn keysym_to_keycode(conn: &impl Connection, setup: &Setup, keysym: Keysym) -> O
 
 /// Check if a key event matches a binding.
 ///
-/// Masks out CapsLock (LockMask) and NumLock (Mod2Mask) from the
-/// event state before comparing, so hotkeys fire regardless of
-/// lock key state.
-pub fn event_matches_binding(event_keycode: u8, event_state: u16, binding: &Binding) -> bool {
-    // Mask out lock bits: CapsLock = LOCK (bit 1), NumLock = MOD2 (bit 4).
-    let lock_mask: u16 = u16::from(ModMask::LOCK) | u16::from(ModMask::M2);
+/// Masks out CapsLock (LockMask) and NumLock from the event state
+/// before comparing, so hotkeys fire regardless of lock key state.
+///
+/// `numlock_mask` is the dynamically detected modifier bit for NumLock
+/// (usually Mod2 / 0x0010, but may differ per X11 server configuration).
+pub fn event_matches_binding(
+    event_keycode: u8,
+    event_state: u16,
+    binding: &Binding,
+    numlock_mask: u16,
+) -> bool {
+    // Mask out lock bits: CapsLock = LOCK (bit 1), NumLock = detected bit.
+    let lock_mask: u16 = u16::from(ModMask::LOCK) | numlock_mask;
     let clean_state = event_state & !lock_mask;
     // Also mask out mouse button bits (bits 8-12) — only compare modifier bits.
     let modifier_mask: u16 = 0x00ff;
@@ -277,20 +284,27 @@ mod tests {
             raw: "Super+Shift+C".into(),
         };
 
+        let numlock = u16::from(ModMask::M2); // Standard Mod2 for test
+
         // Exact match.
-        assert!(event_matches_binding(54, binding.modifiers, &binding));
+        assert!(event_matches_binding(
+            54,
+            binding.modifiers,
+            &binding,
+            numlock
+        ));
 
         // With CapsLock set.
         let with_caps = binding.modifiers | u16::from(ModMask::LOCK);
-        assert!(event_matches_binding(54, with_caps, &binding));
+        assert!(event_matches_binding(54, with_caps, &binding, numlock));
 
         // With NumLock (Mod2) set.
-        let with_num = binding.modifiers | u16::from(ModMask::M2);
-        assert!(event_matches_binding(54, with_num, &binding));
+        let with_num = binding.modifiers | numlock;
+        assert!(event_matches_binding(54, with_num, &binding, numlock));
 
         // With both locks set.
-        let with_both = binding.modifiers | u16::from(ModMask::LOCK) | u16::from(ModMask::M2);
-        assert!(event_matches_binding(54, with_both, &binding));
+        let with_both = binding.modifiers | u16::from(ModMask::LOCK) | numlock;
+        assert!(event_matches_binding(54, with_both, &binding, numlock));
     }
 
     #[test]
@@ -301,7 +315,12 @@ mod tests {
             keysym: 0x63,
             raw: "Super+Shift+C".into(),
         };
-        assert!(!event_matches_binding(55, binding.modifiers, &binding));
+        assert!(!event_matches_binding(
+            55,
+            binding.modifiers,
+            &binding,
+            u16::from(ModMask::M2)
+        ));
     }
 
     #[test]
@@ -313,7 +332,41 @@ mod tests {
             raw: "Super+Shift+C".into(),
         };
         // Only Super, missing Shift.
-        assert!(!event_matches_binding(54, u16::from(ModMask::M4), &binding));
+        assert!(!event_matches_binding(
+            54,
+            u16::from(ModMask::M4),
+            &binding,
+            u16::from(ModMask::M2)
+        ));
+    }
+
+    #[test]
+    fn event_matches_custom_numlock_mask() {
+        let binding = Binding {
+            modifiers: u16::from(ModMask::M4) | u16::from(ModMask::SHIFT),
+            keycode: 54,
+            keysym: 0x63,
+            raw: "Super+Shift+C".into(),
+        };
+
+        // NumLock mapped to Mod3 (bit 5 = 0x0020) instead of standard Mod2.
+        let custom_numlock: u16 = u16::from(ModMask::M3);
+        let with_custom_num = binding.modifiers | custom_numlock;
+        assert!(event_matches_binding(
+            54,
+            with_custom_num,
+            &binding,
+            custom_numlock
+        ));
+
+        // Standard Mod2 should NOT be masked when numlock is Mod3.
+        let with_mod2 = binding.modifiers | u16::from(ModMask::M2);
+        assert!(!event_matches_binding(
+            54,
+            with_mod2,
+            &binding,
+            custom_numlock
+        ));
     }
 
     #[test]
@@ -326,6 +379,11 @@ mod tests {
         };
         // Mouse button 1 set in state (bit 8 = 0x100).
         let with_button = binding.modifiers | 0x100;
-        assert!(event_matches_binding(54, with_button, &binding));
+        assert!(event_matches_binding(
+            54,
+            with_button,
+            &binding,
+            u16::from(ModMask::M2)
+        ));
     }
 }

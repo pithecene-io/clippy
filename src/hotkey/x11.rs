@@ -11,20 +11,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
-use x11rb::protocol::xproto::{self, Atom, GrabMode, ModMask, Window};
+use x11rb::protocol::xproto::{self, Atom, GrabMode, Keysym, ModMask, Window};
 use x11rb::rust_connection::RustConnection;
 
 use super::HotkeyError;
 use super::keybinding::Binding;
 
-/// Lock modifier bits to mask during XGrabKey registration.
-///
-/// NumLock = Mod2 (bit 4), CapsLock = Lock (bit 1).
-/// Each grab is registered 4 times with all combinations of these bits
-/// so hotkeys fire regardless of lock state (CONTRACT_HOTKEY.md §138-139).
-const LOCK_MASK: u16 = 0x0002; // LockMask (CapsLock)
-const NUM_LOCK_MASK: u16 = 0x0010; // Mod2Mask (NumLock)
-const LOCK_MASKS: [u16; 4] = [0, LOCK_MASK, NUM_LOCK_MASK, LOCK_MASK | NUM_LOCK_MASK];
+/// CapsLock modifier bit (always LockMask, bit 1).
+const LOCK_MASK: u16 = 0x0002;
+
+/// XK_Num_Lock keysym for dynamic modifier detection.
+const XK_NUM_LOCK: Keysym = 0xff7f;
 
 /// Pre-interned X11 atoms for property queries.
 struct Atoms {
@@ -38,6 +35,7 @@ pub struct X11Context {
     screen_num: usize,
     root: Window,
     atoms: Atoms,
+    numlock_mask: u16,
 }
 
 impl X11Context {
@@ -61,6 +59,13 @@ impl X11Context {
             .map_err(|e| HotkeyError::X11(format!("intern_atom reply: {e}")))?
             .atom;
 
+        // Detect which modifier bit corresponds to NumLock.
+        let numlock_mask = detect_numlock_mask(&conn);
+        tracing::debug!(
+            numlock_mask = format_args!("0x{numlock_mask:04x}"),
+            "detected NumLock modifier"
+        );
+
         Ok(Self {
             conn: Arc::new(conn),
             screen_num,
@@ -69,6 +74,7 @@ impl X11Context {
                 net_active_window,
                 net_wm_pid,
             },
+            numlock_mask,
         })
     }
 
@@ -82,8 +88,9 @@ impl X11Context {
     /// whatever bindings succeeded.
     pub fn grab_key(&self, binding: &Binding) -> Result<bool, HotkeyError> {
         let mut all_ok = true;
+        let lock_masks = self.lock_masks();
 
-        for &lock_mask in &LOCK_MASKS {
+        for &lock_mask in &lock_masks {
             let mods = ModMask::from(binding.modifiers | lock_mask);
 
             let cookie = xproto::grab_key(
@@ -116,7 +123,8 @@ impl X11Context {
     ///
     /// Ungrabs all 4 lock-mask variants. Best-effort — errors are logged.
     pub fn ungrab_key(&self, binding: &Binding) {
-        for &lock_mask in &LOCK_MASKS {
+        let lock_masks = self.lock_masks();
+        for &lock_mask in &lock_masks {
             let mods = ModMask::from(binding.modifiers | lock_mask);
 
             if let Err(e) = xproto::ungrab_key(&*self.conn, binding.keycode, self.root, mods) {
@@ -213,6 +221,94 @@ impl X11Context {
     pub fn screen_num(&self) -> usize {
         self.screen_num
     }
+
+    /// Get the dynamically detected NumLock modifier mask.
+    pub fn numlock_mask(&self) -> u16 {
+        self.numlock_mask
+    }
+
+    /// Compute lock mask combinations for grab registration.
+    ///
+    /// Returns 4 masks: [0, CapsLock, NumLock, CapsLock|NumLock].
+    fn lock_masks(&self) -> [u16; 4] {
+        [
+            0,
+            LOCK_MASK,
+            self.numlock_mask,
+            LOCK_MASK | self.numlock_mask,
+        ]
+    }
+}
+
+/// Detect which modifier bit corresponds to NumLock by querying the
+/// X11 modifier mapping and keyboard mapping.
+///
+/// Falls back to Mod2 (0x0010) if detection fails — this is the most
+/// common mapping and matches xmodmap defaults.
+fn detect_numlock_mask(conn: &RustConnection) -> u16 {
+    const FALLBACK: u16 = 0x0010; // Mod2Mask
+
+    let mod_reply = match xproto::get_modifier_mapping(conn) {
+        Ok(cookie) => match cookie.reply() {
+            Ok(r) => r,
+            Err(_) => return FALLBACK,
+        },
+        Err(_) => return FALLBACK,
+    };
+
+    let keycodes_per_mod = mod_reply.keycodes_per_modifier() as usize;
+    if keycodes_per_mod == 0 {
+        return FALLBACK;
+    }
+
+    // Resolve XK_Num_Lock → set of keycodes via keyboard mapping.
+    let setup = conn.setup();
+    let min_kc = setup.min_keycode;
+    let max_kc = setup.max_keycode;
+    let count = max_kc - min_kc + 1;
+
+    let kb_reply = match xproto::get_keyboard_mapping(conn, min_kc, count) {
+        Ok(cookie) => match cookie.reply() {
+            Ok(r) => r,
+            Err(_) => return FALLBACK,
+        },
+        Err(_) => return FALLBACK,
+    };
+
+    let syms_per_code = kb_reply.keysyms_per_keycode as usize;
+    if syms_per_code == 0 {
+        return FALLBACK;
+    }
+
+    // Collect keycodes that produce XK_Num_Lock.
+    let mut numlock_keycodes: Vec<u8> = Vec::new();
+    for i in 0..count as usize {
+        let base = i * syms_per_code;
+        for j in 0..syms_per_code {
+            if kb_reply.keysyms.get(base + j) == Some(&XK_NUM_LOCK) {
+                numlock_keycodes.push(min_kc + i as u8);
+                break;
+            }
+        }
+    }
+
+    // Scan modifier map: 8 rows × keycodes_per_modifier.
+    // Row 0 = Shift, 1 = Lock, 2 = Control, 3 = Mod1, ..., 7 = Mod5.
+    // Modifier mask bit for row i = 1 << i.
+    for modifier_idx in 0..8usize {
+        let row_start = modifier_idx * keycodes_per_mod;
+        for k in 0..keycodes_per_mod {
+            if let Some(&keycode) = mod_reply.keycodes.get(row_start + k)
+                && keycode != 0
+                && numlock_keycodes.contains(&keycode)
+            {
+                return 1u16 << modifier_idx;
+            }
+        }
+    }
+
+    // NumLock not found in modifier map.
+    FALLBACK
 }
 
 /// Spawn a dedicated thread that polls the X11 connection for events.
