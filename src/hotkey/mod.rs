@@ -5,9 +5,9 @@
 //! See CONTRACT_HOTKEY.md.
 
 mod broker_client;
-mod focus;
-mod keybinding;
-mod x11;
+pub(crate) mod focus;
+pub(crate) mod keybinding;
+pub(crate) mod x11;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

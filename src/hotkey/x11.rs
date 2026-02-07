@@ -18,24 +18,24 @@ use super::HotkeyError;
 use super::keybinding::Binding;
 
 /// CapsLock modifier bit (always LockMask, bit 1).
-const LOCK_MASK: u16 = 0x0002;
+pub(crate) const LOCK_MASK: u16 = 0x0002;
 
 /// XK_Num_Lock keysym for dynamic modifier detection.
 const XK_NUM_LOCK: Keysym = 0xff7f;
 
 /// Pre-interned X11 atoms for property queries.
-struct Atoms {
-    net_active_window: Atom,
-    net_wm_pid: Atom,
+pub(crate) struct Atoms {
+    pub(crate) net_active_window: Atom,
+    pub(crate) net_wm_pid: Atom,
 }
 
 /// X11 connection context for the hotkey client.
 pub struct X11Context {
-    conn: Arc<RustConnection>,
-    screen_num: usize,
-    root: Window,
-    atoms: Atoms,
-    numlock_mask: u16,
+    pub(crate) conn: Arc<RustConnection>,
+    pub(crate) screen_num: usize,
+    pub(crate) root: Window,
+    pub(crate) atoms: Atoms,
+    pub(crate) numlock_mask: u16,
 }
 
 impl X11Context {
@@ -245,7 +245,7 @@ impl X11Context {
 ///
 /// Falls back to Mod2 (0x0010) if detection fails — this is the most
 /// common mapping and matches xmodmap defaults.
-fn detect_numlock_mask(conn: &RustConnection) -> u16 {
+pub(crate) fn detect_numlock_mask(conn: &RustConnection) -> u16 {
     const FALLBACK: u16 = 0x0010; // Mod2Mask
 
     let mod_reply = match xproto::get_modifier_mapping(conn) {

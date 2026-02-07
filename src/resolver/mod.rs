@@ -12,6 +12,7 @@
 pub mod clipboard;
 pub mod hotkey;
 pub mod session;
+pub mod x11;
 
 pub use clipboard::ClipboardProvider;
 pub use hotkey::{HotkeyEvent, HotkeyProvider, HotkeyRegistration, KeyBinding};
