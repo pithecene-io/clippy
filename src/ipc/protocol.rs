@@ -108,6 +108,19 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// Maximum payload size (16 MiB).
 pub const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 
+/// Minimal envelope for extracting `{type, id}` from unknown messages.
+///
+/// Used by the broker as a fallback when [`Message`] deserialization
+/// fails (e.g., unknown `type` tag). Allows the broker to echo the
+/// request `id` in the error response per CONTRACT_BROKER.md §129.
+#[allow(unused)]
+#[derive(Debug, Deserialize)]
+pub struct RawEnvelope {
+    #[serde(rename = "type")]
+    pub msg_type: String,
+    pub id: u32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
