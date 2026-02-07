@@ -2,7 +2,7 @@
 //!
 //! Design: human-readable tables and status lines. For `get-turn`,
 //! metadata goes to stderr and raw content to stdout so that piping
-//! works naturally (`clippyd client get-turn s1:5 | less`).
+//! works naturally (`clippyctl client get-turn s1:5 | less`).
 
 use std::io::{self, Write};
 

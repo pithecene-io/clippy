@@ -67,13 +67,13 @@ clippy runs as three cooperating processes plus a CLI client:
 
 ```bash
 # 1. Start the broker daemon (manages sessions, turns, and relay)
-clippyd broker
+clippyctl broker
 
 # 2. Wrap an agent session (detects turns, reports to broker)
-clippyd wrap -- claude
+clippyctl wrap -- claude
 
 # 3. Run the hotkey client (global capture/paste hotkeys)
-clippyd hotkey
+clippyctl hotkey
 ```
 
 ### CLI Client
@@ -82,23 +82,23 @@ The `client` subcommand provides one-shot access to all broker operations:
 
 ```bash
 # Session queries
-clippyd client list-sessions
-clippyd client list-turns <session> [--limit N]
-clippyd client get-turn <turn_id> [--metadata-only]
+clippyctl client list-sessions
+clippyctl client list-turns <session> [--limit N]
+clippyctl client get-turn <turn_id> [--metadata-only]
 
 # Relay operations
-clippyd client capture <session>
-clippyd client capture-by-id <turn_id>
-clippyd client paste <session>
+clippyctl client capture <session>
+clippyctl client capture-by-id <turn_id>
+clippyctl client paste <session>
 
 # Sink delivery (clipboard, file, or inject)
-clippyd client deliver clipboard
-clippyd client deliver file --path /tmp/turn.txt
-clippyd client deliver inject --session <session>
+clippyctl client deliver clipboard
+clippyctl client deliver file --path /tmp/turn.txt
+clippyctl client deliver inject --session <session>
 ```
 
 `get-turn` sends metadata to stderr and raw content to stdout, so it
-composes with pipes: `clippyd client get-turn s1:3 | less`
+composes with pipes: `clippyctl client get-turn s1:3 | less`
 
 ---
 
