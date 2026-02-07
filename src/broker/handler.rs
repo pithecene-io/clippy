@@ -65,12 +65,20 @@ pub fn handle_message(
             id,
             session,
             content,
-            interrupted: _,
+            interrupted,
+            timestamp,
         } => {
             if !is_wrapper(state, connection_id) {
                 return (error_response(id, "unknown_type"), None);
             }
-            let response = handle_turn_completed(state, id, &session, content);
+            // v0 wrappers omit timestamp (defaults to 0); fall back to
+            // broker receipt time so the ring record is never zero.
+            let ts = if timestamp == 0 {
+                crate::turn::epoch_millis()
+            } else {
+                timestamp
+            };
+            let response = handle_turn_completed(state, id, &session, content, interrupted, ts);
             (response, None)
         }
         // -- Any role --
@@ -146,21 +154,31 @@ fn handle_turn_completed(
     id: u32,
     session: &str,
     content: Vec<u8>,
+    interrupted: bool,
+    timestamp: u64,
 ) -> Message {
-    match state.store_turn(session, content) {
-        Ok(()) => ok_response(id),
+    match state.store_turn(session, content, interrupted, timestamp) {
+        Ok(turn_id) => Message::Response {
+            id,
+            status: Status::Ok,
+            error: None,
+            size: None,
+            sessions: None,
+            turn_id: Some(turn_id),
+        },
         Err(reason) => error_response(id, reason),
     }
 }
 
 fn handle_capture(state: &mut BrokerState, id: u32, session: &str) -> Message {
     match state.capture(session) {
-        Ok(size) => Message::Response {
+        Ok(result) => Message::Response {
             id,
             status: Status::Ok,
             error: None,
-            size: Some(size),
+            size: Some(result.size),
             sessions: None,
+            turn_id: Some(result.turn_id),
         },
         Err(reason) => error_response(id, reason),
     }
@@ -191,6 +209,7 @@ fn handle_list_sessions(state: &BrokerState, id: u32) -> Message {
         error: None,
         size: None,
         sessions: Some(sessions),
+        turn_id: None,
     }
 }
 
@@ -207,6 +226,7 @@ fn ok_response(id: u32) -> Message {
         error: None,
         size: None,
         sessions: None,
+        turn_id: None,
     }
 }
 
@@ -217,6 +237,7 @@ fn error_response(id: u32, reason: &str) -> Message {
         error: Some(reason.into()),
         size: None,
         sessions: None,
+        turn_id: None,
     }
 }
 
@@ -225,7 +246,8 @@ mod tests {
     use super::*;
 
     fn fresh() -> (BrokerState, ConnectionId) {
-        let state = BrokerState::new();
+        use crate::broker::state::RingConfig;
+        let state = BrokerState::new(RingConfig::default());
         let conn = ConnectionId::new();
         (state, conn)
     }
@@ -404,6 +426,7 @@ mod tests {
                 session: "s1".into(),
                 content: b"output".to_vec(),
                 interrupted: false,
+                timestamp: 1000,
             },
             c,
         );
@@ -427,6 +450,7 @@ mod tests {
                 session: "nonexistent".into(),
                 content: b"data".to_vec(),
                 interrupted: false,
+                timestamp: 1000,
             },
             c,
         );
@@ -457,6 +481,7 @@ mod tests {
                 session: "s1".into(),
                 content: b"data".to_vec(),
                 interrupted: false,
+                timestamp: 1000,
             },
             c,
         );
@@ -482,6 +507,7 @@ mod tests {
                 session: "s1".into(),
                 content: b"12345".to_vec(),
                 interrupted: false,
+                timestamp: 1000,
             },
             c,
         );
@@ -529,6 +555,7 @@ mod tests {
                 session: "s1".into(),
                 content: b"turn data".to_vec(),
                 interrupted: false,
+                timestamp: 1000,
             },
             c1,
         );
@@ -664,12 +691,158 @@ mod tests {
                 session: "s1".into(),
                 content: b"data".to_vec(),
                 interrupted: false,
+                timestamp: 1000,
             },
             c,
         );
         match resp {
             Message::Response { id, .. } => assert_eq!(id, 42),
             _ => panic!("expected Response"),
+        }
+    }
+
+    // -- Turn ID in responses --
+
+    #[test]
+    fn turn_completed_response_includes_turn_id() {
+        let (mut s, c) = fresh();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        handle_message(&mut s, register(1, "s1", 100), c);
+
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"data".to_vec(),
+                interrupted: false,
+                timestamp: 1000,
+            },
+            c,
+        );
+        match resp {
+            Message::Response {
+                status, turn_id, ..
+            } => {
+                assert_eq!(status, Status::Ok);
+                assert_eq!(turn_id, Some("s1:1".into()));
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn capture_response_includes_turn_id() {
+        let (mut s, c) = fresh();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        handle_message(&mut s, register(1, "s1", 100), c);
+        handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"data".to_vec(),
+                interrupted: false,
+                timestamp: 1000,
+            },
+            c,
+        );
+
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::Capture {
+                id: 3,
+                session: "s1".into(),
+            },
+            c,
+        );
+        match resp {
+            Message::Response {
+                status,
+                size,
+                turn_id,
+                ..
+            } => {
+                assert_eq!(status, Status::Ok);
+                assert_eq!(size, Some(4));
+                assert_eq!(turn_id, Some("s1:1".into()));
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn interrupted_flag_stored_via_handler() {
+        let (mut s, c) = fresh();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        handle_message(&mut s, register(1, "s1", 100), c);
+
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"data".to_vec(),
+                interrupted: true,
+                timestamp: 1000,
+            },
+            c,
+        );
+        assert!(matches!(
+            resp,
+            Message::Response {
+                status: Status::Ok,
+                ..
+            }
+        ));
+
+        // Verify the interrupted flag was actually stored.
+        let turns = s.list_turns("s1", None).unwrap();
+        assert!(turns[0].interrupted);
+    }
+
+    #[test]
+    fn turn_id_increments_across_turns() {
+        let (mut s, c) = fresh();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        handle_message(&mut s, register(1, "s1", 100), c);
+
+        let (r1, _) = handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"a".to_vec(),
+                interrupted: false,
+                timestamp: 1000,
+            },
+            c,
+        );
+        let (r2, _) = handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 3,
+                session: "s1".into(),
+                content: b"b".to_vec(),
+                interrupted: false,
+                timestamp: 1000,
+            },
+            c,
+        );
+
+        match (r1, r2) {
+            (
+                Message::Response {
+                    turn_id: Some(t1), ..
+                },
+                Message::Response {
+                    turn_id: Some(t2), ..
+                },
+            ) => {
+                assert_eq!(t1, "s1:1");
+                assert_eq!(t2, "s1:2");
+            }
+            _ => panic!("expected Responses with turn_ids"),
         }
     }
 }

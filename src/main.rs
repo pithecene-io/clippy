@@ -26,8 +26,15 @@ async fn main() {
                 std::process::exit(1);
             }
         },
-        Command::Broker => {
-            if let Err(e) = broker::run().await {
+        Command::Broker {
+            ring_depth,
+            max_turn_size,
+        } => {
+            let config = broker::state::RingConfig {
+                depth: ring_depth as usize,
+                max_turn_bytes: max_turn_size,
+            };
+            if let Err(e) = broker::run(config).await {
                 tracing::error!(error = %e, "broker failed");
                 eprintln!("clippyd broker: {e}");
                 std::process::exit(1);

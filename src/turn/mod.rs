@@ -9,6 +9,8 @@
 pub mod ansi;
 pub mod presets;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use ansi::AnsiStripper;
 use regex::Regex;
 
@@ -31,6 +33,16 @@ pub struct Turn {
     pub content: Vec<u8>,
     /// Whether the turn was interrupted (e.g., Ctrl+C).
     pub interrupted: bool,
+    /// Unix epoch milliseconds when the turn was detected.
+    pub timestamp: u64,
+}
+
+/// Current time as Unix epoch milliseconds.
+pub(crate) fn epoch_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before epoch")
+        .as_millis() as u64
 }
 
 /// Events emitted by the turn detector.
@@ -210,6 +222,7 @@ impl TurnDetector {
                         events.push(TurnEvent::TurnCompleted(Turn {
                             content,
                             interrupted: self.interrupted,
+                            timestamp: epoch_millis(),
                         }));
                     }
                     // Even if content was empty (e.g., only whitespace

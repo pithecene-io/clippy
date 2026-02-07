@@ -43,6 +43,11 @@ pub enum Message {
         #[serde(with = "serde_bytes")]
         content: Vec<u8>,
         interrupted: bool,
+        /// Unix epoch millis when the turn was detected by the wrapper.
+        /// Defaults to 0 when absent (v0 compat); the broker falls back
+        /// to receipt time.
+        #[serde(default)]
+        timestamp: u64,
     },
 
     // -- Capture / Paste --
@@ -75,6 +80,8 @@ pub enum Message {
         size: Option<u32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         sessions: Option<Vec<SessionDescriptor>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        turn_id: Option<String>,
     },
 }
 
@@ -100,6 +107,17 @@ pub struct SessionDescriptor {
     pub session: String,
     pub pid: u32,
     pub has_turn: bool,
+}
+
+/// Turn descriptor returned in list_turns responses (metadata only, no content).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnDescriptor {
+    pub turn_id: String,
+    pub timestamp: u64,
+    pub byte_length: u32,
+    pub interrupted: bool,
+    pub truncated: bool,
 }
 
 /// Protocol version for v0.
@@ -182,12 +200,53 @@ mod tests {
     }
 
     #[test]
+    fn turn_completed_v0_compat_no_timestamp() {
+        // v0 wrappers omit timestamp — field must default to 0.
+        #[derive(serde::Serialize)]
+        struct V0TurnCompleted {
+            #[serde(rename = "type")]
+            msg_type: &'static str,
+            id: u32,
+            session: String,
+            #[serde(with = "serde_bytes")]
+            content: Vec<u8>,
+            interrupted: bool,
+        }
+        let v0 = V0TurnCompleted {
+            msg_type: "turn_completed",
+            id: 5,
+            session: "s1".into(),
+            content: b"hello".to_vec(),
+            interrupted: false,
+        };
+        let encoded = rmp_serde::to_vec_named(&v0).unwrap();
+        let decoded: Message = rmp_serde::from_slice(&encoded).unwrap();
+        match decoded {
+            Message::TurnCompleted {
+                id,
+                session,
+                content,
+                interrupted,
+                timestamp,
+            } => {
+                assert_eq!(id, 5);
+                assert_eq!(session, "s1");
+                assert_eq!(content, b"hello");
+                assert!(!interrupted);
+                assert_eq!(timestamp, 0, "missing timestamp must default to 0");
+            }
+            _ => panic!("expected TurnCompleted"),
+        }
+    }
+
+    #[test]
     fn turn_completed_round_trip() {
         let msg = Message::TurnCompleted {
             id: 3,
             session: "abc-123".into(),
             content: b"hello world\nline 2\n".to_vec(),
             interrupted: false,
+            timestamp: 1000,
         };
         assert_eq!(round_trip(&msg), msg);
     }
@@ -201,6 +260,7 @@ mod tests {
             session: "test".into(),
             content: binary_content.clone(),
             interrupted: true,
+            timestamp: 1000,
         };
         let decoded = round_trip(&msg);
         match decoded {
@@ -252,6 +312,7 @@ mod tests {
             error: None,
             size: None,
             sessions: None,
+            turn_id: None,
         };
         assert_eq!(round_trip(&msg), msg);
     }
@@ -264,6 +325,7 @@ mod tests {
             error: None,
             size: Some(1024),
             sessions: None,
+            turn_id: None,
         };
         assert_eq!(round_trip(&msg), msg);
     }
@@ -287,6 +349,7 @@ mod tests {
                     has_turn: false,
                 },
             ]),
+            turn_id: None,
         };
         assert_eq!(round_trip(&msg), msg);
     }
@@ -299,8 +362,36 @@ mod tests {
             error: Some("session_not_found".into()),
             size: None,
             sessions: None,
+            turn_id: None,
         };
         assert_eq!(round_trip(&msg), msg);
+    }
+
+    #[test]
+    fn response_with_turn_id_round_trip() {
+        let msg = Message::Response {
+            id: 3,
+            status: Status::Ok,
+            error: None,
+            size: Some(42),
+            sessions: None,
+            turn_id: Some("s1:5".into()),
+        };
+        assert_eq!(round_trip(&msg), msg);
+    }
+
+    #[test]
+    fn turn_descriptor_round_trip() {
+        let td = TurnDescriptor {
+            turn_id: "s1:1".into(),
+            timestamp: 1700000000000,
+            byte_length: 256,
+            interrupted: false,
+            truncated: false,
+        };
+        let encoded = rmp_serde::to_vec_named(&td).unwrap();
+        let decoded: TurnDescriptor = rmp_serde::from_slice(&encoded).unwrap();
+        assert_eq!(decoded, td);
     }
 
     #[test]

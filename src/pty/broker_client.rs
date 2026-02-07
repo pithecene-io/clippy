@@ -136,6 +136,7 @@ impl BrokerClient {
                 session: self.session_id.clone(),
                 content: turn.content.clone(),
                 interrupted: turn.interrupted,
+                timestamp: turn.timestamp,
             })
             .await
             .map_err(|e| PtyError::Broker(format!("send turn: {e}")))

@@ -140,6 +140,7 @@ async fn handle_connection(
                             error: Some("unknown_type".into()),
                             size: None,
                             sessions: None,
+                            turn_id: None,
                         };
                         framed.send(response).await.map_err(ConnectionError::Codec)?;
                     }

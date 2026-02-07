@@ -248,6 +248,7 @@ mod tests {
                 session: "s1".into(),
                 content: b"turn content".to_vec(),
                 interrupted: false,
+                timestamp: 1000,
             },
             Message::Capture {
                 id: 4,
@@ -268,6 +269,7 @@ mod tests {
                 error: None,
                 size: Some(100),
                 sessions: None,
+                turn_id: None,
             },
         ];
 
@@ -332,6 +334,7 @@ mod tests {
             session: "s".into(),
             content: content.clone(),
             interrupted: true,
+            timestamp: 1000,
         };
 
         let mut buf = encode_message(&msg);
