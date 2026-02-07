@@ -40,6 +40,10 @@ pub enum Command {
         /// Paste hotkey binding
         #[arg(long, default_value = "Super+Shift+V")]
         paste_key: String,
+
+        /// Clipboard-deliver hotkey binding (capture + copy to clipboard)
+        #[arg(long)]
+        clipboard_key: Option<String>,
     },
 
     /// CLI client for broker operations

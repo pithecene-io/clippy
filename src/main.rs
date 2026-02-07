@@ -48,8 +48,9 @@ async fn main() {
         Command::Hotkey {
             capture_key,
             paste_key,
+            clipboard_key,
         } => {
-            if let Err(e) = hotkey::run(capture_key, paste_key).await {
+            if let Err(e) = hotkey::run(capture_key, paste_key, clipboard_key).await {
                 tracing::error!(error = %e, "hotkey failed");
                 eprintln!("clippyd hotkey: {e}");
                 std::process::exit(1);

@@ -40,6 +40,7 @@ pub enum HotkeyError {
 enum Action {
     Capture,
     Paste,
+    Clipboard,
 }
 
 /// Run the hotkey client.
@@ -56,7 +57,11 @@ enum Action {
 /// - Action serialization (§199)
 /// - Ungrab on shutdown (§154-155)
 /// - Broker disconnect → ungrab + exit non-zero (§213-218)
-pub async fn run(capture_key: String, paste_key: String) -> Result<(), HotkeyError> {
+pub async fn run(
+    capture_key: String,
+    paste_key: String,
+    clipboard_key: Option<String>,
+) -> Result<(), HotkeyError> {
     // 1. Connect to broker — fail hard if unreachable.
     let mut broker = BrokerClient::connect().await?;
     tracing::info!("connected to broker");
@@ -112,6 +117,29 @@ pub async fn run(capture_key: String, paste_key: String) -> Result<(), HotkeyErr
         }
     }
 
+    let clipboard_binding = match clipboard_key {
+        Some(key) => {
+            let binding = parse_binding(&key, &**x11.conn(), x11.setup())?;
+            match x11.grab_key(&binding) {
+                Ok(true) => {
+                    bindings_ok += 1;
+                    tracing::info!(binding = %binding.raw, "clipboard hotkey grabbed");
+                }
+                Ok(false) => {
+                    eprintln!(
+                        "warning: clipboard hotkey {} could not be grabbed (conflict)",
+                        binding.raw
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(binding = %binding.raw, error = %e, "grab failed");
+                }
+            }
+            Some(binding)
+        }
+        None => None,
+    };
+
     // CONTRACT_HOTKEY.md §149-150: if no bindings succeed, exit.
     if bindings_ok == 0 {
         return Err(HotkeyError::NoBindings);
@@ -150,7 +178,7 @@ pub async fn run(capture_key: String, paste_key: String) -> Result<(), HotkeyErr
                     break;
                 };
 
-                if let Some(action) = classify_event(&event, &capture_binding, &paste_binding, x11.numlock_mask())
+                if let Some(action) = classify_event(&event, &capture_binding, &paste_binding, clipboard_binding.as_ref(), x11.numlock_mask())
                     && let Err(e) = dispatch_action(action, &x11, &mut broker).await
                 {
                     // Check if this is a broker disconnect.
@@ -199,6 +227,9 @@ pub async fn run(capture_key: String, paste_key: String) -> Result<(), HotkeyErr
     // Ungrab all registered hotkeys (CONTRACT_HOTKEY.md §154-155).
     x11.ungrab_key(&capture_binding);
     x11.ungrab_key(&paste_binding);
+    if let Some(binding) = &clipboard_binding {
+        x11.ungrab_key(binding);
+    }
 
     // Wait for X11 thread to exit (will exit within 100ms due to poll timeout).
     if let Err(e) = x11_thread.join() {
@@ -221,6 +252,7 @@ fn classify_event(
     event: &Event,
     capture_binding: &Binding,
     paste_binding: &Binding,
+    clipboard_binding: Option<&Binding>,
     numlock_mask: u16,
 ) -> Option<Action> {
     // We only care about KeyPress events.
@@ -236,6 +268,12 @@ fn classify_event(
         Some(Action::Capture)
     } else if event_matches_binding(keycode, state, paste_binding, numlock_mask) {
         Some(Action::Paste)
+    } else if let Some(binding) = clipboard_binding {
+        if event_matches_binding(keycode, state, binding, numlock_mask) {
+            Some(Action::Clipboard)
+        } else {
+            None
+        }
     } else {
         None
     }
@@ -275,6 +313,12 @@ async fn dispatch_action(
             broker.paste(&session_id).await?;
             tracing::info!(session = %session_id, "pasted");
             eprintln!("pasted to session {session_id}");
+        }
+        Action::Clipboard => {
+            let size = broker.capture(&session_id).await?;
+            broker.deliver_clipboard().await?;
+            tracing::info!(session = %session_id, size, "captured to clipboard");
+            eprintln!("captured {size} bytes to clipboard from session {session_id}");
         }
     }
 
