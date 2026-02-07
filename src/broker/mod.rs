@@ -703,4 +703,280 @@ mod tests {
             "expected ok response after unknown_type, got {resp:?}"
         );
     }
+
+    #[tokio::test]
+    async fn get_turn_and_list_turns_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("broker.sock");
+        let _broker = start_broker(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Wrapper registers and sends two turns.
+        let mut wrapper = connect(&sock).await;
+        handshake(&mut wrapper, Role::Wrapper).await;
+        send_recv(
+            &mut wrapper,
+            Message::Register {
+                id: 1,
+                session: "s1".into(),
+                pid: 42,
+                pattern: "generic".into(),
+            },
+        )
+        .await;
+
+        let resp = send_recv(
+            &mut wrapper,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"first turn".to_vec(),
+                interrupted: false,
+                timestamp: 1000,
+            },
+        )
+        .await;
+        let first_turn_id = match &resp {
+            Message::Response { turn_id, .. } => turn_id.clone().unwrap(),
+            other => panic!("expected Response, got {other:?}"),
+        };
+
+        let resp = send_recv(
+            &mut wrapper,
+            Message::TurnCompleted {
+                id: 3,
+                session: "s1".into(),
+                content: b"second turn".to_vec(),
+                interrupted: true,
+                timestamp: 2000,
+            },
+        )
+        .await;
+        let second_turn_id = match &resp {
+            Message::Response { turn_id, .. } => turn_id.clone().unwrap(),
+            other => panic!("expected Response, got {other:?}"),
+        };
+
+        // Client queries.
+        let mut client = connect(&sock).await;
+        handshake(&mut client, Role::Client).await;
+
+        // -- GetTurn: fetch specific turn by ID --
+        let resp = send_recv(
+            &mut client,
+            Message::GetTurn {
+                id: 10,
+                turn_id: first_turn_id.clone(),
+            },
+        )
+        .await;
+        match &resp {
+            Message::Response {
+                id,
+                status,
+                turn_id,
+                content,
+                timestamp,
+                byte_length,
+                interrupted,
+                truncated,
+                ..
+            } => {
+                assert_eq!(*id, 10);
+                assert_eq!(*status, Status::Ok);
+                assert_eq!(turn_id.as_deref(), Some(first_turn_id.as_str()));
+                assert_eq!(content.as_deref(), Some(b"first turn".as_slice()));
+                assert_eq!(*timestamp, Some(1000));
+                assert_eq!(*byte_length, Some(10));
+                assert_eq!(*interrupted, Some(false));
+                assert_eq!(*truncated, Some(false));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+
+        // -- ListTurns: all turns, newest first --
+        let resp = send_recv(
+            &mut client,
+            Message::ListTurns {
+                id: 11,
+                session: "s1".into(),
+                limit: None,
+            },
+        )
+        .await;
+        match &resp {
+            Message::Response {
+                id, status, turns, ..
+            } => {
+                assert_eq!(*id, 11);
+                assert_eq!(*status, Status::Ok);
+                let turns = turns.as_ref().unwrap();
+                assert_eq!(turns.len(), 2);
+                // Newest first.
+                assert_eq!(turns[0].turn_id, second_turn_id);
+                assert!(turns[0].interrupted);
+                assert_eq!(turns[1].turn_id, first_turn_id);
+                assert!(!turns[1].interrupted);
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+
+        // -- ListTurns with limit --
+        let resp = send_recv(
+            &mut client,
+            Message::ListTurns {
+                id: 12,
+                session: "s1".into(),
+                limit: Some(1),
+            },
+        )
+        .await;
+        match &resp {
+            Message::Response { turns, .. } => {
+                let turns = turns.as_ref().unwrap();
+                assert_eq!(turns.len(), 1);
+                assert_eq!(turns[0].turn_id, second_turn_id);
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+
+        // -- GetTurn: not found --
+        let resp = send_recv(
+            &mut client,
+            Message::GetTurn {
+                id: 13,
+                turn_id: "s1:999".into(),
+            },
+        )
+        .await;
+        match &resp {
+            Message::Response { status, error, .. } => {
+                assert_eq!(*status, Status::Error);
+                assert_eq!(error.as_deref(), Some("turn_not_found"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn capture_by_id_and_paste_flow() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("broker.sock");
+        let _broker = start_broker(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Wrapper registers and sends two turns.
+        let mut wrapper = connect(&sock).await;
+        handshake(&mut wrapper, Role::Wrapper).await;
+        send_recv(
+            &mut wrapper,
+            Message::Register {
+                id: 1,
+                session: "s1".into(),
+                pid: 42,
+                pattern: "generic".into(),
+            },
+        )
+        .await;
+
+        let resp = send_recv(
+            &mut wrapper,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"older turn content".to_vec(),
+                interrupted: false,
+                timestamp: 1000,
+            },
+        )
+        .await;
+        let first_turn_id = match &resp {
+            Message::Response { turn_id, .. } => turn_id.clone().unwrap(),
+            other => panic!("expected Response, got {other:?}"),
+        };
+
+        send_recv(
+            &mut wrapper,
+            Message::TurnCompleted {
+                id: 3,
+                session: "s1".into(),
+                content: b"newer turn content".to_vec(),
+                interrupted: false,
+                timestamp: 2000,
+            },
+        )
+        .await;
+
+        // Client captures the OLDER turn by ID (not the head).
+        let mut client = connect(&sock).await;
+        handshake(&mut client, Role::Client).await;
+
+        let resp = send_recv(
+            &mut client,
+            Message::CaptureByID {
+                id: 10,
+                turn_id: first_turn_id.clone(),
+            },
+        )
+        .await;
+        match &resp {
+            Message::Response {
+                id,
+                status,
+                size,
+                turn_id,
+                ..
+            } => {
+                assert_eq!(*id, 10);
+                assert_eq!(*status, Status::Ok);
+                assert_eq!(*size, Some(18)); // b"older turn content".len()
+                assert_eq!(turn_id.as_deref(), Some(first_turn_id.as_str()));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+
+        // Paste to wrapper — should inject the older turn's content.
+        let resp = send_recv(
+            &mut client,
+            Message::Paste {
+                id: 11,
+                session: "s1".into(),
+            },
+        )
+        .await;
+        assert!(matches!(
+            resp,
+            Message::Response {
+                status: Status::Ok,
+                ..
+            }
+        ));
+
+        // Wrapper receives inject with the older turn's content.
+        let inject = wrapper.next().await.unwrap().unwrap();
+        match inject {
+            Message::Inject { id, content } => {
+                assert_eq!(id, 0); // Unsolicited
+                assert_eq!(content, b"older turn content");
+            }
+            other => panic!("expected Inject, got {other:?}"),
+        }
+
+        // CaptureByID not found.
+        let resp = send_recv(
+            &mut client,
+            Message::CaptureByID {
+                id: 12,
+                turn_id: "s1:999".into(),
+            },
+        )
+        .await;
+        match &resp {
+            Message::Response { status, error, .. } => {
+                assert_eq!(*status, Status::Error);
+                assert_eq!(error.as_deref(), Some("turn_not_found"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
 }

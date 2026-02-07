@@ -263,6 +263,19 @@ mod tests {
                 content: b"inject bytes".to_vec(),
             },
             Message::ListSessions { id: 6 },
+            Message::GetTurn {
+                id: 7,
+                turn_id: "s1:1".into(),
+            },
+            Message::ListTurns {
+                id: 8,
+                session: "s1".into(),
+                limit: Some(5),
+            },
+            Message::CaptureByID {
+                id: 9,
+                turn_id: "s1:2".into(),
+            },
             Message::Response {
                 id: 1,
                 status: Status::Ok,
@@ -270,6 +283,12 @@ mod tests {
                 size: Some(100),
                 sessions: None,
                 turn_id: None,
+                content: None,
+                timestamp: None,
+                byte_length: None,
+                interrupted: None,
+                truncated: None,
+                turns: None,
             },
         ];
 

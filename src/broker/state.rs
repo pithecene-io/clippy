@@ -225,7 +225,6 @@ impl BrokerState {
     ///
     /// Turn IDs have the format `<session_id>:<seq>`. The session ID
     /// is extracted by splitting on the first `:`.
-    #[allow(dead_code)]
     pub fn get_turn(&self, turn_id: &str) -> Result<&TurnRecord, &'static str> {
         let session_id = turn_id
             .split_once(':')
@@ -236,7 +235,6 @@ impl BrokerState {
     }
 
     /// List turn descriptors for a session, newest first.
-    #[allow(dead_code)]
     pub fn list_turns(
         &self,
         session_id: &str,
@@ -250,7 +248,6 @@ impl BrokerState {
     ///
     /// Like [`capture`](Self::capture) but resolves a specific turn
     /// from the ring instead of the head.
-    #[allow(dead_code)]
     pub fn capture_by_id(&mut self, turn_id: &str) -> Result<CaptureResult, &'static str> {
         let session_id = turn_id
             .split_once(':')

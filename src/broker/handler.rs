@@ -6,7 +6,7 @@
 //!
 //! See CONTRACT_BROKER.md §Request / Response.
 
-use crate::ipc::protocol::{Message, PROTOCOL_VERSION, Role, Status};
+use crate::ipc::protocol::{Message, PROTOCOL_VERSION, Role, Status, TurnDescriptor};
 
 use super::state::{BrokerState, ConnectionId};
 
@@ -91,6 +91,19 @@ pub fn handle_message(
             let response = handle_list_sessions(state, id);
             (response, None)
         }
+        // -- Turn registry queries (v1, any role) --
+        Message::GetTurn { id, turn_id } => {
+            let response = handle_get_turn(state, id, &turn_id);
+            (response, None)
+        }
+        Message::ListTurns { id, session, limit } => {
+            let response = handle_list_turns(state, id, &session, limit);
+            (response, None)
+        }
+        Message::CaptureByID { id, turn_id } => {
+            let response = handle_capture_by_id(state, id, &turn_id);
+            (response, None)
+        }
         // Server-originated messages should never be sent by clients.
         Message::HelloAck { id, .. }
         | Message::Response { id, .. }
@@ -165,6 +178,12 @@ fn handle_turn_completed(
             size: None,
             sessions: None,
             turn_id: Some(turn_id),
+            content: None,
+            timestamp: None,
+            byte_length: None,
+            interrupted: None,
+            truncated: None,
+            turns: None,
         },
         Err(reason) => error_response(id, reason),
     }
@@ -179,6 +198,12 @@ fn handle_capture(state: &mut BrokerState, id: u32, session: &str) -> Message {
             size: Some(result.size),
             sessions: None,
             turn_id: Some(result.turn_id),
+            content: None,
+            timestamp: None,
+            byte_length: None,
+            interrupted: None,
+            truncated: None,
+            turns: None,
         },
         Err(reason) => error_response(id, reason),
     }
@@ -210,6 +235,85 @@ fn handle_list_sessions(state: &BrokerState, id: u32) -> Message {
         size: None,
         sessions: Some(sessions),
         turn_id: None,
+        content: None,
+        timestamp: None,
+        byte_length: None,
+        interrupted: None,
+        truncated: None,
+        turns: None,
+    }
+}
+
+fn handle_get_turn(state: &BrokerState, id: u32, turn_id: &str) -> Message {
+    match state.get_turn(turn_id) {
+        Ok(record) => Message::Response {
+            id,
+            status: Status::Ok,
+            error: None,
+            size: None,
+            sessions: None,
+            turn_id: Some(record.turn_id.clone()),
+            content: Some(record.content.clone()),
+            timestamp: Some(record.timestamp),
+            byte_length: Some(record.byte_length),
+            interrupted: Some(record.interrupted),
+            truncated: Some(record.truncated),
+            turns: None,
+        },
+        Err(reason) => error_response(id, reason),
+    }
+}
+
+fn handle_list_turns(state: &BrokerState, id: u32, session: &str, limit: Option<u32>) -> Message {
+    let limit = limit.map(|n| n as usize);
+    match state.list_turns(session, limit) {
+        Ok(records) => {
+            let turns: Vec<TurnDescriptor> = records
+                .into_iter()
+                .map(|r| TurnDescriptor {
+                    turn_id: r.turn_id.clone(),
+                    timestamp: r.timestamp,
+                    byte_length: r.byte_length,
+                    interrupted: r.interrupted,
+                    truncated: r.truncated,
+                })
+                .collect();
+            Message::Response {
+                id,
+                status: Status::Ok,
+                error: None,
+                size: None,
+                sessions: None,
+                turn_id: None,
+                content: None,
+                timestamp: None,
+                byte_length: None,
+                interrupted: None,
+                truncated: None,
+                turns: Some(turns),
+            }
+        }
+        Err(reason) => error_response(id, reason),
+    }
+}
+
+fn handle_capture_by_id(state: &mut BrokerState, id: u32, turn_id: &str) -> Message {
+    match state.capture_by_id(turn_id) {
+        Ok(result) => Message::Response {
+            id,
+            status: Status::Ok,
+            error: None,
+            size: Some(result.size),
+            sessions: None,
+            turn_id: Some(result.turn_id),
+            content: None,
+            timestamp: None,
+            byte_length: None,
+            interrupted: None,
+            truncated: None,
+            turns: None,
+        },
+        Err(reason) => error_response(id, reason),
     }
 }
 
@@ -227,6 +331,12 @@ fn ok_response(id: u32) -> Message {
         size: None,
         sessions: None,
         turn_id: None,
+        content: None,
+        timestamp: None,
+        byte_length: None,
+        interrupted: None,
+        truncated: None,
+        turns: None,
     }
 }
 
@@ -238,6 +348,12 @@ fn error_response(id: u32, reason: &str) -> Message {
         size: None,
         sessions: None,
         turn_id: None,
+        content: None,
+        timestamp: None,
+        byte_length: None,
+        interrupted: None,
+        truncated: None,
+        turns: None,
     }
 }
 
@@ -844,5 +960,414 @@ mod tests {
             }
             _ => panic!("expected Responses with turn_ids"),
         }
+    }
+
+    // -- GetTurn --
+
+    /// Helper: set up a session with a single turn and return state + connection.
+    fn setup_with_turn() -> (BrokerState, ConnectionId) {
+        let (mut s, c) = fresh();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        handle_message(&mut s, register(1, "s1", 100), c);
+        handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"hello world".to_vec(),
+                interrupted: false,
+                timestamp: 5000,
+            },
+            c,
+        );
+        (s, c)
+    }
+
+    #[test]
+    fn get_turn_success() {
+        let (mut s, c) = setup_with_turn();
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::GetTurn {
+                id: 10,
+                turn_id: "s1:1".into(),
+            },
+            c,
+        );
+        match resp {
+            Message::Response {
+                id,
+                status,
+                turn_id,
+                content,
+                timestamp,
+                byte_length,
+                interrupted,
+                truncated,
+                ..
+            } => {
+                assert_eq!(id, 10);
+                assert_eq!(status, Status::Ok);
+                assert_eq!(turn_id, Some("s1:1".into()));
+                assert_eq!(content, Some(b"hello world".to_vec()));
+                assert_eq!(timestamp, Some(5000));
+                assert_eq!(byte_length, Some(11));
+                assert_eq!(interrupted, Some(false));
+                assert_eq!(truncated, Some(false));
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn get_turn_not_found() {
+        let (mut s, c) = setup_with_turn();
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::GetTurn {
+                id: 10,
+                turn_id: "s1:999".into(),
+            },
+            c,
+        );
+        match resp {
+            Message::Response { error, .. } => {
+                assert_eq!(error.as_deref(), Some("turn_not_found"));
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    // -- ListTurns --
+
+    #[test]
+    fn list_turns_success() {
+        let (mut s, c) = fresh();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        handle_message(&mut s, register(1, "s1", 100), c);
+        for i in 0..3 {
+            handle_message(
+                &mut s,
+                Message::TurnCompleted {
+                    id: 2 + i,
+                    session: "s1".into(),
+                    content: format!("turn-{i}").into_bytes(),
+                    interrupted: false,
+                    timestamp: 1000 + u64::from(i),
+                },
+                c,
+            );
+        }
+
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::ListTurns {
+                id: 10,
+                session: "s1".into(),
+                limit: None,
+            },
+            c,
+        );
+        match resp {
+            Message::Response {
+                status, turns, id, ..
+            } => {
+                assert_eq!(id, 10);
+                assert_eq!(status, Status::Ok);
+                let turns = turns.unwrap();
+                assert_eq!(turns.len(), 3);
+                // Newest first.
+                assert_eq!(turns[0].turn_id, "s1:3");
+                assert_eq!(turns[1].turn_id, "s1:2");
+                assert_eq!(turns[2].turn_id, "s1:1");
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn list_turns_with_limit() {
+        let (mut s, c) = fresh();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        handle_message(&mut s, register(1, "s1", 100), c);
+        for i in 0..5 {
+            handle_message(
+                &mut s,
+                Message::TurnCompleted {
+                    id: 2 + i,
+                    session: "s1".into(),
+                    content: b"x".to_vec(),
+                    interrupted: false,
+                    timestamp: 1000,
+                },
+                c,
+            );
+        }
+
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::ListTurns {
+                id: 10,
+                session: "s1".into(),
+                limit: Some(2),
+            },
+            c,
+        );
+        match resp {
+            Message::Response { turns, .. } => {
+                assert_eq!(turns.unwrap().len(), 2);
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn list_turns_session_not_found() {
+        let (mut s, c) = fresh();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::ListTurns {
+                id: 10,
+                session: "nonexistent".into(),
+                limit: None,
+            },
+            c,
+        );
+        match resp {
+            Message::Response { error, .. } => {
+                assert_eq!(error.as_deref(), Some("session_not_found"));
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    // -- CaptureByID --
+
+    #[test]
+    fn capture_by_id_success() {
+        let (mut s, c) = fresh();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        handle_message(&mut s, register(1, "s1", 100), c);
+        handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"first".to_vec(),
+                interrupted: false,
+                timestamp: 1000,
+            },
+            c,
+        );
+        handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 3,
+                session: "s1".into(),
+                content: b"second".to_vec(),
+                interrupted: false,
+                timestamp: 2000,
+            },
+            c,
+        );
+
+        // Capture the first turn, not the latest.
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::CaptureByID {
+                id: 10,
+                turn_id: "s1:1".into(),
+            },
+            c,
+        );
+        match resp {
+            Message::Response {
+                status,
+                size,
+                turn_id,
+                ..
+            } => {
+                assert_eq!(status, Status::Ok);
+                assert_eq!(size, Some(5)); // b"first".len()
+                assert_eq!(turn_id, Some("s1:1".into()));
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn capture_by_id_not_found() {
+        let (mut s, c) = setup_with_turn();
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::CaptureByID {
+                id: 10,
+                turn_id: "s1:999".into(),
+            },
+            c,
+        );
+        match resp {
+            Message::Response { error, .. } => {
+                assert_eq!(error.as_deref(), Some("turn_not_found"));
+            }
+            _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn capture_by_id_then_paste() {
+        let (mut s, c1) = fresh();
+        let c2 = ConnectionId::new();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), c1);
+        handle_message(
+            &mut s,
+            Message::Hello {
+                id: 0,
+                version: PROTOCOL_VERSION,
+                role: Role::Client,
+            },
+            c2,
+        );
+        handle_message(&mut s, register(1, "s1", 100), c1);
+        handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"first".to_vec(),
+                interrupted: false,
+                timestamp: 1000,
+            },
+            c1,
+        );
+        handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 3,
+                session: "s1".into(),
+                content: b"second".to_vec(),
+                interrupted: false,
+                timestamp: 2000,
+            },
+            c1,
+        );
+
+        // Capture the first turn by ID.
+        handle_message(
+            &mut s,
+            Message::CaptureByID {
+                id: 4,
+                turn_id: "s1:1".into(),
+            },
+            c2,
+        );
+
+        // Paste — should inject the first turn's content.
+        let (resp, inject) = handle_message(
+            &mut s,
+            Message::Paste {
+                id: 5,
+                session: "s1".into(),
+            },
+            c2,
+        );
+        assert!(matches!(
+            resp,
+            Message::Response {
+                status: Status::Ok,
+                ..
+            }
+        ));
+        let inject = inject.expect("paste should produce InjectAction");
+        match inject.message {
+            Message::Inject { content, .. } => {
+                assert_eq!(content, b"first");
+            }
+            _ => panic!("expected Inject"),
+        }
+    }
+
+    #[test]
+    fn v1_queries_work_from_client_role() {
+        let (mut s, c) = fresh();
+        // Connect as Client (not Wrapper).
+        handle_message(
+            &mut s,
+            Message::Hello {
+                id: 0,
+                version: PROTOCOL_VERSION,
+                role: Role::Client,
+            },
+            c,
+        );
+
+        // Need a wrapper to register a session.
+        let w = ConnectionId::new();
+        handle_message(&mut s, hello(PROTOCOL_VERSION), w);
+        handle_message(&mut s, register(1, "s1", 100), w);
+        handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 2,
+                session: "s1".into(),
+                content: b"data".to_vec(),
+                interrupted: false,
+                timestamp: 1000,
+            },
+            w,
+        );
+
+        // Client can use GetTurn.
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::GetTurn {
+                id: 10,
+                turn_id: "s1:1".into(),
+            },
+            c,
+        );
+        assert!(matches!(
+            resp,
+            Message::Response {
+                status: Status::Ok,
+                ..
+            }
+        ));
+
+        // Client can use ListTurns.
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::ListTurns {
+                id: 11,
+                session: "s1".into(),
+                limit: None,
+            },
+            c,
+        );
+        assert!(matches!(
+            resp,
+            Message::Response {
+                status: Status::Ok,
+                ..
+            }
+        ));
+
+        // Client can use CaptureByID.
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::CaptureByID {
+                id: 12,
+                turn_id: "s1:1".into(),
+            },
+            c,
+        );
+        assert!(matches!(
+            resp,
+            Message::Response {
+                status: Status::Ok,
+                ..
+            }
+        ));
     }
 }

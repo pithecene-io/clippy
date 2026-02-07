@@ -69,6 +69,21 @@ pub enum Message {
     #[serde(rename = "list_sessions")]
     ListSessions { id: u32 },
 
+    // -- Turn registry (v1) --
+    #[serde(rename = "get_turn")]
+    GetTurn { id: u32, turn_id: String },
+
+    #[serde(rename = "list_turns")]
+    ListTurns {
+        id: u32,
+        session: String,
+        #[serde(default)]
+        limit: Option<u32>,
+    },
+
+    #[serde(rename = "capture_by_id")]
+    CaptureByID { id: u32, turn_id: String },
+
     // -- Generic response --
     #[serde(rename = "response")]
     Response {
@@ -82,6 +97,20 @@ pub enum Message {
         sessions: Option<Vec<SessionDescriptor>>,
         #[serde(skip_serializing_if = "Option::is_none")]
         turn_id: Option<String>,
+        // -- GetTurn content + metadata (v1) --
+        #[serde(default, skip_serializing_if = "Option::is_none", with = "serde_bytes")]
+        content: Option<Vec<u8>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        byte_length: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        interrupted: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        truncated: Option<bool>,
+        // -- ListTurns descriptors (v1) --
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turns: Option<Vec<TurnDescriptor>>,
     },
 }
 
@@ -110,7 +139,6 @@ pub struct SessionDescriptor {
 }
 
 /// Turn descriptor returned in list_turns responses (metadata only, no content).
-#[allow(dead_code)]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnDescriptor {
     pub turn_id: String,
@@ -313,6 +341,12 @@ mod tests {
             size: None,
             sessions: None,
             turn_id: None,
+            content: None,
+            timestamp: None,
+            byte_length: None,
+            interrupted: None,
+            truncated: None,
+            turns: None,
         };
         assert_eq!(round_trip(&msg), msg);
     }
@@ -326,6 +360,12 @@ mod tests {
             size: Some(1024),
             sessions: None,
             turn_id: None,
+            content: None,
+            timestamp: None,
+            byte_length: None,
+            interrupted: None,
+            truncated: None,
+            turns: None,
         };
         assert_eq!(round_trip(&msg), msg);
     }
@@ -350,6 +390,12 @@ mod tests {
                 },
             ]),
             turn_id: None,
+            content: None,
+            timestamp: None,
+            byte_length: None,
+            interrupted: None,
+            truncated: None,
+            turns: None,
         };
         assert_eq!(round_trip(&msg), msg);
     }
@@ -363,6 +409,12 @@ mod tests {
             size: None,
             sessions: None,
             turn_id: None,
+            content: None,
+            timestamp: None,
+            byte_length: None,
+            interrupted: None,
+            truncated: None,
+            turns: None,
         };
         assert_eq!(round_trip(&msg), msg);
     }
@@ -376,6 +428,12 @@ mod tests {
             size: Some(42),
             sessions: None,
             turn_id: Some("s1:5".into()),
+            content: None,
+            timestamp: None,
+            byte_length: None,
+            interrupted: None,
+            truncated: None,
+            turns: None,
         };
         assert_eq!(round_trip(&msg), msg);
     }
@@ -392,6 +450,116 @@ mod tests {
         let encoded = rmp_serde::to_vec_named(&td).unwrap();
         let decoded: TurnDescriptor = rmp_serde::from_slice(&encoded).unwrap();
         assert_eq!(decoded, td);
+    }
+
+    #[test]
+    fn get_turn_round_trip() {
+        let msg = Message::GetTurn {
+            id: 10,
+            turn_id: "s1:3".into(),
+        };
+        assert_eq!(round_trip(&msg), msg);
+    }
+
+    #[test]
+    fn list_turns_round_trip() {
+        let msg = Message::ListTurns {
+            id: 11,
+            session: "s1".into(),
+            limit: Some(5),
+        };
+        assert_eq!(round_trip(&msg), msg);
+    }
+
+    #[test]
+    fn list_turns_no_limit_round_trip() {
+        // Verifies serde(default) on limit: omitting the field works.
+        #[derive(serde::Serialize)]
+        struct NoLimit {
+            #[serde(rename = "type")]
+            msg_type: &'static str,
+            id: u32,
+            session: String,
+        }
+        let no_limit = NoLimit {
+            msg_type: "list_turns",
+            id: 12,
+            session: "s1".into(),
+        };
+        let encoded = rmp_serde::to_vec_named(&no_limit).unwrap();
+        let decoded: Message = rmp_serde::from_slice(&encoded).unwrap();
+        match decoded {
+            Message::ListTurns {
+                id, session, limit, ..
+            } => {
+                assert_eq!(id, 12);
+                assert_eq!(session, "s1");
+                assert_eq!(limit, None);
+            }
+            _ => panic!("expected ListTurns"),
+        }
+    }
+
+    #[test]
+    fn capture_by_id_round_trip() {
+        let msg = Message::CaptureByID {
+            id: 13,
+            turn_id: "s1:2".into(),
+        };
+        assert_eq!(round_trip(&msg), msg);
+    }
+
+    #[test]
+    fn response_with_content_round_trip() {
+        let msg = Message::Response {
+            id: 10,
+            status: Status::Ok,
+            error: None,
+            size: None,
+            sessions: None,
+            turn_id: Some("s1:3".into()),
+            content: Some(b"hello world".to_vec()),
+            timestamp: Some(1700000000000),
+            byte_length: Some(11),
+            interrupted: Some(false),
+            truncated: Some(false),
+            turns: None,
+        };
+        assert_eq!(round_trip(&msg), msg);
+    }
+
+    #[test]
+    fn response_with_turns_round_trip() {
+        let msg = Message::Response {
+            id: 11,
+            status: Status::Ok,
+            error: None,
+            size: None,
+            sessions: None,
+            turn_id: None,
+            content: None,
+            timestamp: None,
+            byte_length: None,
+            interrupted: None,
+            truncated: None,
+            turns: Some(vec![
+                TurnDescriptor {
+                    turn_id: "s1:2".into(),
+                    timestamp: 2000,
+                    byte_length: 100,
+                    interrupted: false,
+                    truncated: false,
+                },
+                TurnDescriptor {
+                    turn_id: "s1:1".into(),
+                    timestamp: 1000,
+                    byte_length: 50,
+                    interrupted: true,
+                    truncated: false,
+                },
+            ]),
+        };
+        assert_eq!(round_trip(&msg), msg);
     }
 
     #[test]

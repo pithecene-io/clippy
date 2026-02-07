@@ -141,6 +141,12 @@ async fn handle_connection(
                             size: None,
                             sessions: None,
                             turn_id: None,
+                            content: None,
+                            timestamp: None,
+                            byte_length: None,
+                            interrupted: None,
+                            truncated: None,
+                            turns: None,
                         };
                         framed.send(response).await.map_err(ConnectionError::Codec)?;
                     }

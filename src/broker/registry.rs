@@ -96,13 +96,11 @@ impl TurnRingBuffer {
     }
 
     /// Look up a turn by its ID. Linear scan (capacity is small).
-    #[allow(dead_code)]
     pub fn get(&self, turn_id: &str) -> Option<&TurnRecord> {
         self.entries.iter().find(|r| r.turn_id == turn_id)
     }
 
     /// Iterate turns newest-first, with an optional limit.
-    #[allow(dead_code)]
     pub fn iter_newest_first(&self, limit: Option<usize>) -> impl Iterator<Item = &TurnRecord> {
         self.entries.iter().take(limit.unwrap_or(usize::MAX))
     }
