@@ -1,6 +1,7 @@
 mod broker;
 mod cli;
 mod hotkey;
+#[allow(unused)]
 mod ipc;
 mod pty;
 mod turn;
