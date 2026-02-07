@@ -6,7 +6,7 @@
 //!
 //! See CONTRACT_BROKER.md §Request / Response.
 
-use crate::ipc::protocol::{Message, PROTOCOL_VERSION, Status};
+use crate::ipc::protocol::{Message, PROTOCOL_VERSION, Role, Status};
 
 use super::state::{BrokerState, ConnectionId};
 
@@ -27,8 +27,10 @@ pub struct InjectAction {
 /// sends the response back to the requesting connection and, if
 /// present, routes the inject action to the target wrapper.
 ///
-/// Server-originated message variants (`HelloAck`, `Response`,
-/// `Inject`) are treated as unknown types per CONTRACT_BROKER.md §129.
+/// Enforces:
+/// - Role-based access: wrapper-only messages rejected from clients
+///   (CONTRACT_BROKER.md §136, §193)
+/// - Server-originated variants → `unknown_type` (CONTRACT_BROKER.md §129)
 pub fn handle_message(
     state: &mut BrokerState,
     request: Message,
@@ -39,16 +41,23 @@ pub fn handle_message(
             let response = handle_hello(state, id, version, role, connection_id);
             (response, None)
         }
+        // -- Wrapper-only messages --
         Message::Register {
             id,
             session,
             pid,
             pattern: _,
         } => {
+            if !is_wrapper(state, connection_id) {
+                return (error_response(id, "unknown_type"), None);
+            }
             let response = handle_register(state, id, session, pid, connection_id);
             (response, None)
         }
         Message::Deregister { id, session } => {
+            if !is_wrapper(state, connection_id) {
+                return (error_response(id, "unknown_type"), None);
+            }
             let response = handle_deregister(state, id, &session);
             (response, None)
         }
@@ -58,9 +67,13 @@ pub fn handle_message(
             content,
             interrupted: _,
         } => {
+            if !is_wrapper(state, connection_id) {
+                return (error_response(id, "unknown_type"), None);
+            }
             let response = handle_turn_completed(state, id, &session, content);
             (response, None)
         }
+        // -- Any role --
         Message::Capture { id, session } => {
             let response = handle_capture(state, id, &session);
             (response, None)
@@ -83,20 +96,28 @@ fn handle_hello(
     state: &mut BrokerState,
     id: u32,
     version: u32,
-    role: crate::ipc::protocol::Role,
+    role: Role,
     connection_id: ConnectionId,
 ) -> Message {
-    let _ = role; // Stored by connection layer, not state.
+    // CONTRACT_BROKER.md §102: hello.id MUST be 0.
+    if id != 0 {
+        return Message::HelloAck {
+            id: 0,
+            status: Status::Error,
+            error: Some("invalid_hello_id".into()),
+        };
+    }
     if version != PROTOCOL_VERSION {
         return Message::HelloAck {
-            id,
+            id: 0,
             status: Status::Error,
             error: Some("version_mismatch".into()),
         };
     }
-    state.add_connection(connection_id);
+    state.add_connection(connection_id, role);
+    // CONTRACT_BROKER.md §111: hello_ack.id MUST be 0.
     Message::HelloAck {
-        id,
+        id: 0,
         status: Status::Ok,
         error: None,
     }
@@ -173,7 +194,11 @@ fn handle_list_sessions(state: &BrokerState, id: u32) -> Message {
     }
 }
 
-// -- Response builders --
+// -- Helpers --
+
+fn is_wrapper(state: &BrokerState, connection_id: ConnectionId) -> bool {
+    state.connection_role(connection_id) == Some(Role::Wrapper)
+}
 
 fn ok_response(id: u32) -> Message {
     Message::Response {
@@ -198,7 +223,6 @@ fn error_response(id: u32, reason: &str) -> Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ipc::protocol::Role;
 
     fn fresh() -> (BrokerState, ConnectionId) {
         let state = BrokerState::new();
@@ -233,6 +257,7 @@ mod tests {
         assert!(matches!(
             resp,
             Message::HelloAck {
+                id: 0,
                 status: Status::Ok,
                 ..
             }
@@ -244,10 +269,47 @@ mod tests {
         let (mut s, c) = fresh();
         let (resp, _) = handle_message(&mut s, hello(999), c);
         match resp {
-            Message::HelloAck { status, error, .. } => {
+            Message::HelloAck {
+                id, status, error, ..
+            } => {
+                assert_eq!(id, 0); // Fixed ID per contract
                 assert_eq!(status, Status::Error);
                 assert_eq!(error.as_deref(), Some("version_mismatch"));
             }
+            _ => panic!("expected HelloAck"),
+        }
+    }
+
+    #[test]
+    fn hello_nonzero_id_rejected() {
+        let (mut s, c) = fresh();
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::Hello {
+                id: 5,
+                version: PROTOCOL_VERSION,
+                role: Role::Wrapper,
+            },
+            c,
+        );
+        match resp {
+            Message::HelloAck {
+                id, status, error, ..
+            } => {
+                assert_eq!(id, 0); // Always 0
+                assert_eq!(status, Status::Error);
+                assert_eq!(error.as_deref(), Some("invalid_hello_id"));
+            }
+            _ => panic!("expected HelloAck"),
+        }
+    }
+
+    #[test]
+    fn hello_ack_always_id_zero() {
+        let (mut s, c) = fresh();
+        let (resp, _) = handle_message(&mut s, hello(PROTOCOL_VERSION), c);
+        match resp {
+            Message::HelloAck { id, .. } => assert_eq!(id, 0),
             _ => panic!("expected HelloAck"),
         }
     }
@@ -279,6 +341,28 @@ mod tests {
                 assert_eq!(error.as_deref(), Some("duplicate_session"));
             }
             _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn register_rejected_from_client() {
+        let (mut s, c) = fresh();
+        // Connect as client role
+        handle_message(
+            &mut s,
+            Message::Hello {
+                id: 0,
+                version: PROTOCOL_VERSION,
+                role: Role::Client,
+            },
+            c,
+        );
+        let (resp, _) = handle_message(&mut s, register(1, "s1", 100), c);
+        match resp {
+            Message::Response { error, .. } => {
+                assert_eq!(error.as_deref(), Some("unknown_type"));
+            }
+            _ => panic!("expected error Response"),
         }
     }
 
@@ -351,6 +435,36 @@ mod tests {
                 assert_eq!(error.as_deref(), Some("session_not_found"));
             }
             _ => panic!("expected Response"),
+        }
+    }
+
+    #[test]
+    fn turn_completed_rejected_from_client() {
+        let (mut s, c) = fresh();
+        handle_message(
+            &mut s,
+            Message::Hello {
+                id: 0,
+                version: PROTOCOL_VERSION,
+                role: Role::Client,
+            },
+            c,
+        );
+        let (resp, _) = handle_message(
+            &mut s,
+            Message::TurnCompleted {
+                id: 1,
+                session: "s1".into(),
+                content: b"data".to_vec(),
+                interrupted: false,
+            },
+            c,
+        );
+        match resp {
+            Message::Response { error, .. } => {
+                assert_eq!(error.as_deref(), Some("unknown_type"));
+            }
+            _ => panic!("expected error Response"),
         }
     }
 

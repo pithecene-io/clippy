@@ -3,10 +3,10 @@
 //! All methods are pure state transitions with no I/O. Error strings
 //! are machine-readable reasons from CONTRACT_BROKER.md §Error Semantics.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ipc::protocol::SessionDescriptor;
+use crate::ipc::protocol::{Role, SessionDescriptor};
 
 /// Unique identifier for a client connection.
 ///
@@ -43,8 +43,8 @@ pub struct BrokerState {
     sessions: HashMap<String, SessionEntry>,
     /// Global single-slot relay buffer. `None` until first capture.
     relay_buffer: Option<Vec<u8>>,
-    /// Set of active connection IDs (for liveness checks).
-    connections: HashSet<ConnectionId>,
+    /// Active connections keyed by ID, storing their role.
+    connections: HashMap<ConnectionId, Role>,
 }
 
 impl BrokerState {
@@ -52,13 +52,18 @@ impl BrokerState {
         Self {
             sessions: HashMap::new(),
             relay_buffer: None,
-            connections: HashSet::new(),
+            connections: HashMap::new(),
         }
     }
 
-    /// Register a new connection.
-    pub fn add_connection(&mut self, id: ConnectionId) {
-        self.connections.insert(id);
+    /// Register a new connection with its role.
+    pub fn add_connection(&mut self, id: ConnectionId, role: Role) {
+        self.connections.insert(id, role);
+    }
+
+    /// Get the role for a connection, if it exists.
+    pub fn connection_role(&self, id: ConnectionId) -> Option<Role> {
+        self.connections.get(&id).copied()
     }
 
     /// Remove a connection and implicitly deregister any associated session.
@@ -137,7 +142,7 @@ impl BrokerState {
     pub fn paste_content(&self, session_id: &str) -> Result<(Vec<u8>, ConnectionId), &'static str> {
         let content = self.relay_buffer.as_ref().ok_or("buffer_empty")?.clone();
         let entry = self.sessions.get(session_id).ok_or("session_not_found")?;
-        if !self.connections.contains(&entry.connection_id) {
+        if !self.connections.contains_key(&entry.connection_id) {
             return Err("session_disconnected");
         }
         Ok((content, entry.connection_id))
@@ -177,10 +182,20 @@ mod tests {
     fn add_and_remove_connection() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
-        assert!(s.connections.contains(&c));
+        s.add_connection(c, Role::Wrapper);
+        assert!(s.connections.contains_key(&c));
         s.remove_connection(c);
-        assert!(!s.connections.contains(&c));
+        assert!(!s.connections.contains_key(&c));
+    }
+
+    #[test]
+    fn connection_role_tracking() {
+        let mut s = state();
+        let c = conn();
+        s.add_connection(c, Role::Client);
+        assert_eq!(s.connection_role(c), Some(Role::Client));
+        s.remove_connection(c);
+        assert_eq!(s.connection_role(c), None);
     }
 
     // -- Registration --
@@ -189,7 +204,7 @@ mod tests {
     fn register_session_success() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         assert!(s.register_session("s1".into(), c, 100).is_ok());
         assert_eq!(s.sessions.len(), 1);
     }
@@ -198,7 +213,7 @@ mod tests {
     fn register_duplicate_session() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         assert_eq!(
             s.register_session("s1".into(), c, 200),
@@ -210,7 +225,7 @@ mod tests {
     fn deregister_session_removes_entry() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         s.deregister_session("s1");
         assert!(s.sessions.is_empty());
@@ -229,7 +244,7 @@ mod tests {
     fn remove_connection_deregisters_session() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         s.remove_connection(c);
         assert!(s.sessions.is_empty());
@@ -240,8 +255,8 @@ mod tests {
         let mut s = state();
         let c1 = conn();
         let c2 = conn();
-        s.add_connection(c1);
-        s.add_connection(c2);
+        s.add_connection(c1, Role::Wrapper);
+        s.add_connection(c2, Role::Wrapper);
         s.register_session("s1".into(), c1, 100).unwrap();
         s.register_session("s2".into(), c2, 200).unwrap();
         s.remove_connection(c1);
@@ -255,7 +270,7 @@ mod tests {
     fn store_turn_success() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         assert!(s.store_turn("s1", b"turn content".to_vec()).is_ok());
     }
@@ -264,7 +279,7 @@ mod tests {
     fn store_turn_replaces_previous() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         s.store_turn("s1", b"first".to_vec()).unwrap();
         s.store_turn("s1", b"second".to_vec()).unwrap();
@@ -289,7 +304,7 @@ mod tests {
     fn capture_success() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         s.store_turn("s1", b"turn data".to_vec()).unwrap();
         let size = s.capture("s1").unwrap();
@@ -307,7 +322,7 @@ mod tests {
     fn capture_no_turn() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         assert_eq!(s.capture("s1"), Err("no_turn"));
     }
@@ -316,7 +331,7 @@ mod tests {
     fn capture_does_not_clear_session_turn() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         s.store_turn("s1", b"turn data".to_vec()).unwrap();
         s.capture("s1").unwrap();
@@ -328,7 +343,7 @@ mod tests {
     fn capture_overwrites_relay_buffer() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         s.store_turn("s1", b"first".to_vec()).unwrap();
         s.capture("s1").unwrap();
@@ -344,8 +359,8 @@ mod tests {
         let mut s = state();
         let c1 = conn();
         let c2 = conn();
-        s.add_connection(c1);
-        s.add_connection(c2);
+        s.add_connection(c1, Role::Wrapper);
+        s.add_connection(c2, Role::Wrapper);
         s.register_session("s1".into(), c1, 100).unwrap();
         s.register_session("s2".into(), c2, 200).unwrap();
         s.store_turn("s1", b"turn data".to_vec()).unwrap();
@@ -360,7 +375,7 @@ mod tests {
     fn paste_buffer_empty() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         assert_eq!(s.paste_content("s1"), Err("buffer_empty"));
     }
@@ -376,7 +391,7 @@ mod tests {
     fn paste_session_disconnected() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         s.store_turn("s1", b"turn data".to_vec()).unwrap();
         s.capture("s1").unwrap();
@@ -389,7 +404,7 @@ mod tests {
     fn paste_does_not_clear_relay_buffer() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         s.store_turn("s1", b"data".to_vec()).unwrap();
         s.capture("s1").unwrap();
@@ -410,12 +425,12 @@ mod tests {
     fn list_sessions_populated() {
         let mut s = state();
         let c = conn();
-        s.add_connection(c);
+        s.add_connection(c, Role::Wrapper);
         s.register_session("s1".into(), c, 100).unwrap();
         s.store_turn("s1", b"data".to_vec()).unwrap();
 
         let c2 = conn();
-        s.add_connection(c2);
+        s.add_connection(c2, Role::Wrapper);
         s.register_session("s2".into(), c2, 200).unwrap();
 
         let mut list = s.list_sessions();

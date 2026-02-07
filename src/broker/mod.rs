@@ -210,17 +210,18 @@ async fn bind_socket(path: &std::path::Path) -> Result<UnixListener, BrokerError
             path: parent.to_path_buf(),
             source: e,
         })?;
-        // Set directory permissions to 0700.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
-                |e| BrokerError::MkdirFailed {
-                    path: parent.to_path_buf(),
-                    source: e,
-                },
-            )?;
-        }
+    }
+    // Always validate/set directory permissions to 0700, even if the
+    // directory already existed (CONTRACT_BROKER.md §63).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+            BrokerError::MkdirFailed {
+                path: parent.to_path_buf(),
+                source: e,
+            }
+        })?;
     }
 
     match UnixListener::bind(path) {
@@ -263,7 +264,7 @@ mod tests {
     use tokio::net::UnixStream;
     use tokio_util::codec::Framed;
 
-    use crate::ipc::codec::LengthPrefixedCodec;
+    use crate::ipc::codec::{FrameCodec, LengthPrefixedCodec};
     use crate::ipc::protocol::{Message, PROTOCOL_VERSION, Role, Status};
 
     /// Start a broker on a temp socket and return the socket path.
@@ -568,5 +569,135 @@ mod tests {
             }
             other => panic!("expected Response, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn non_hello_first_message_closes_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("broker.sock");
+        let _broker = start_broker(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Send Register as first message (not Hello).
+        let mut conn = connect(&sock).await;
+        conn.send(Message::Register {
+            id: 1,
+            session: "s1".into(),
+            pid: 42,
+            pattern: "generic".into(),
+        })
+        .await
+        .unwrap();
+
+        // Connection should be closed without any response.
+        let next = conn.next().await;
+        assert!(next.is_none(), "expected connection closed, got {next:?}");
+    }
+
+    #[tokio::test]
+    async fn unknown_type_returns_error_keeps_connection() {
+        use bytes::BufMut;
+
+        let dir = tempfile::tempdir().unwrap();
+        let sock = dir.path().join("broker.sock");
+        let _broker = start_broker(&sock).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Use FrameCodec for raw frame control.
+        let stream = UnixStream::connect(&sock).await.unwrap();
+        let mut framed = Framed::new(stream, FrameCodec::new());
+
+        // Handshake normally first.
+        let hello = Message::Hello {
+            id: 0,
+            version: PROTOCOL_VERSION,
+            role: Role::Client,
+        };
+        let hello_bytes = rmp_serde::to_vec_named(&hello).unwrap();
+        let mut hello_frame = bytes::BytesMut::new();
+        hello_frame.put_u32(hello_bytes.len() as u32);
+        hello_frame.extend_from_slice(&hello_bytes);
+
+        // Send hello as raw frame via FrameCodec (which encodes Message).
+        framed.send(hello).await.unwrap();
+        let ack_raw = framed.next().await.unwrap().unwrap();
+        let ack: Message = rmp_serde::from_slice(&ack_raw).unwrap();
+        assert!(matches!(
+            ack,
+            Message::HelloAck {
+                status: Status::Ok,
+                ..
+            }
+        ));
+
+        // Send an unknown message type as raw MessagePack.
+        // {type: "frobnicate", id: 42}
+        #[derive(serde::Serialize)]
+        struct FakeMsg {
+            #[serde(rename = "type")]
+            msg_type: String,
+            id: u32,
+        }
+        let unknown_msg = rmp_serde::to_vec_named(&FakeMsg {
+            msg_type: "frobnicate".into(),
+            id: 42,
+        })
+        .unwrap();
+        let mut raw_frame = bytes::BytesMut::new();
+        raw_frame.put_u32(unknown_msg.len() as u32);
+        raw_frame.extend_from_slice(&unknown_msg);
+
+        // We need to send raw bytes, but FrameCodec::Encoder expects Message.
+        // Write directly to the underlying stream instead.
+        use tokio::io::AsyncWriteExt;
+        let stream = framed.into_inner();
+        let (mut reader, mut writer) = stream.into_split();
+        writer.write_all(&raw_frame).await.unwrap();
+
+        // Read response frame.
+        use tokio::io::AsyncReadExt;
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf).await.unwrap();
+        let resp_len = u32::from_be_bytes(len_buf) as usize;
+        let mut resp_buf = vec![0u8; resp_len];
+        reader.read_exact(&mut resp_buf).await.unwrap();
+        let resp: Message = rmp_serde::from_slice(&resp_buf).unwrap();
+
+        match resp {
+            Message::Response {
+                id, status, error, ..
+            } => {
+                assert_eq!(id, 42); // Echoed from unknown message
+                assert_eq!(status, Status::Error);
+                assert_eq!(error.as_deref(), Some("unknown_type"));
+            }
+            other => panic!("expected error Response, got {other:?}"),
+        }
+
+        // Connection should still be open — send a valid message.
+        let list_msg = rmp_serde::to_vec_named(&Message::ListSessions { id: 7 }).unwrap();
+        let mut list_frame = bytes::BytesMut::new();
+        list_frame.put_u32(list_msg.len() as u32);
+        list_frame.extend_from_slice(&list_msg);
+        writer.write_all(&list_frame).await.unwrap();
+
+        let mut len_buf = [0u8; 4];
+        reader.read_exact(&mut len_buf).await.unwrap();
+        let resp_len = u32::from_be_bytes(len_buf) as usize;
+        let mut resp_buf = vec![0u8; resp_len];
+        reader.read_exact(&mut resp_buf).await.unwrap();
+        let resp: Message = rmp_serde::from_slice(&resp_buf).unwrap();
+
+        assert!(
+            matches!(
+                resp,
+                Message::Response {
+                    id: 7,
+                    status: Status::Ok,
+                    ..
+                }
+            ),
+            "expected ok response after unknown_type, got {resp:?}"
+        );
     }
 }

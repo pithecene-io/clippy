@@ -15,7 +15,7 @@ use tokio::net::UnixStream;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::codec::Framed;
 
-use crate::ipc::codec::{CodecError, LengthPrefixedCodec};
+use crate::ipc::codec::{CodecError, DecodeResult, FrameCodec, decode_frame};
 use crate::ipc::protocol::{Message, Status};
 
 use super::state::ConnectionId;
@@ -39,6 +39,10 @@ pub struct DisconnectNotice {
 enum ConnectionError {
     #[error("unexpected EOF during handshake")]
     HandshakeEof,
+    #[error("first message must be Hello")]
+    NotHello,
+    #[error("malformed frame: {0}")]
+    MalformedFrame(#[from] rmp_serde::decode::Error),
     #[error("codec error: {0}")]
     Codec(#[from] CodecError),
     #[error("broker loop closed")]
@@ -75,16 +79,33 @@ async fn handle_connection(
     cmd_tx: mpsc::UnboundedSender<BrokerCommand>,
     mut inject_rx: mpsc::UnboundedReceiver<Message>,
 ) -> Result<(), ConnectionError> {
-    let mut framed = Framed::new(stream, LengthPrefixedCodec::new());
+    let mut framed = Framed::new(stream, FrameCodec::new());
 
     // -- Handshake: first message must be Hello --
-    let first = framed
+    let first_frame = framed
         .next()
         .await
         .ok_or(ConnectionError::HandshakeEof)?
         .map_err(ConnectionError::Codec)?;
 
-    let response = send_command(&cmd_tx, first, conn_id).await?;
+    let first_msg = match decode_frame(&first_frame) {
+        DecodeResult::Ok(msg @ Message::Hello { .. }) => msg,
+        DecodeResult::Ok(_non_hello) => {
+            // First message is a valid message but not Hello — reject.
+            // We can't echo a meaningful id without parsing, but the
+            // client violated the protocol so we close immediately.
+            return Err(ConnectionError::NotHello);
+        }
+        DecodeResult::UnknownType(_envelope) => {
+            // Unknown type as first message — not a Hello.
+            return Err(ConnectionError::NotHello);
+        }
+        DecodeResult::Malformed(e) => {
+            return Err(ConnectionError::MalformedFrame(e));
+        }
+    };
+
+    let response = send_command(&cmd_tx, first_msg, conn_id).await?;
     let is_error = is_error_hello_ack(&response);
     framed
         .send(response)
@@ -100,13 +121,33 @@ async fn handle_connection(
     loop {
         tokio::select! {
             frame = framed.next() => {
-                let msg = match frame {
-                    Some(Ok(msg)) => msg,
+                let raw = match frame {
+                    Some(Ok(raw)) => raw,
                     Some(Err(e)) => return Err(ConnectionError::Codec(e)),
                     None => return Ok(()), // Clean disconnect.
                 };
-                let response = send_command(&cmd_tx, msg, conn_id).await?;
-                framed.send(response).await.map_err(ConnectionError::Codec)?;
+                match decode_frame(&raw) {
+                    DecodeResult::Ok(msg) => {
+                        let response = send_command(&cmd_tx, msg, conn_id).await?;
+                        framed.send(response).await.map_err(ConnectionError::Codec)?;
+                    }
+                    DecodeResult::UnknownType(envelope) => {
+                        // Unknown message type — send error with echoed id,
+                        // keep connection open per CONTRACT_BROKER.md §129.
+                        let response = Message::Response {
+                            id: envelope.id,
+                            status: Status::Error,
+                            error: Some("unknown_type".into()),
+                            size: None,
+                            sessions: None,
+                        };
+                        framed.send(response).await.map_err(ConnectionError::Codec)?;
+                    }
+                    DecodeResult::Malformed(e) => {
+                        // Completely unrecoverable — can't extract id.
+                        return Err(ConnectionError::MalformedFrame(e));
+                    }
+                }
             }
             inject = inject_rx.recv() => {
                 match inject {

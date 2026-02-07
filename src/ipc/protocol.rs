@@ -113,10 +113,11 @@ pub const MAX_PAYLOAD_SIZE: usize = 16 * 1024 * 1024;
 /// Used by the broker as a fallback when [`Message`] deserialization
 /// fails (e.g., unknown `type` tag). Allows the broker to echo the
 /// request `id` in the error response per CONTRACT_BROKER.md §129.
-#[allow(unused)]
 #[derive(Debug, Deserialize)]
 pub struct RawEnvelope {
+    /// Consumed by serde for structural matching; not read by broker code.
     #[serde(rename = "type")]
+    #[allow(dead_code)]
     pub msg_type: String,
     pub id: u32,
 }
