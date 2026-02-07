@@ -38,6 +38,17 @@ pub fn spawn_child(command: &[String], winsize: &Winsize) -> Result<ChildProcess
         return Err(PtyError::Exec("empty command".into()));
     }
 
+    // Validate and prepare C strings before any resource allocation.
+    // Reject arguments containing NUL bytes rather than silently
+    // dropping them (which would mutate the effective argv).
+    let c_args: Vec<CString> = command
+        .iter()
+        .map(|s| {
+            CString::new(s.as_bytes())
+                .map_err(|_| PtyError::Exec(format!("argument contains null byte: {s:?}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
     // Allocate PTY pair with initial dimensions matching user's terminal.
     let pty = openpty(Some(winsize), None).map_err(PtyError::PtyAlloc)?;
     let master = pty.master;
@@ -49,17 +60,6 @@ pub fn spawn_child(command: &[String], winsize: &Winsize) -> Result<ChildProcess
         nix::fcntl::FcntlArg::F_SETFL(nix::fcntl::OFlag::O_NONBLOCK),
     )
     .map_err(PtyError::PtyAlloc)?;
-
-    // Prepare C strings for exec before forking (heap allocation).
-    // Reject any argument containing NUL bytes rather than silently
-    // dropping it (which would mutate the effective argv).
-    let c_args: Vec<CString> = command
-        .iter()
-        .map(|s| {
-            CString::new(s.as_bytes())
-                .map_err(|_| PtyError::Exec(format!("argument contains null byte: {s:?}")))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
 
     // SAFETY: Between fork() and exec()/_exit(), only async-signal-safe
     // functions are called. All heap allocation happens before fork.

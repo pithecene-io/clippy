@@ -20,6 +20,7 @@ use nix::sys::signal::{self, Signal};
 use nix::unistd::Pid;
 use tokio::io::unix::AsyncFd;
 use tokio::signal::unix::{SignalKind, signal as tokio_signal};
+use tokio::time;
 
 use broker_client::BrokerClient;
 use child::{spawn_child, wait_for_exit};
@@ -272,31 +273,45 @@ pub async fn run_session(pattern: String, command: Vec<String>) -> Result<i32, P
         }
 
         // Send pending turns (outside select! to avoid borrow conflicts).
+        // All broker I/O is bounded by a timeout so it cannot stall the
+        // main I/O loop (CONTRACT_PTY.md §46, §49).
         if !pending_turns.is_empty() {
             // Always update the local latest-turn buffer (for late registration).
             latest_turn = pending_turns.last().cloned();
 
+            const BROKER_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
             if let Some(ref mut broker) = broker_client {
                 for turn in &pending_turns {
-                    if let Err(e) = broker.send_turn(turn).await {
-                        tracing::warn!(error = %e, "failed to send turn to broker");
+                    match time::timeout(BROKER_IO_TIMEOUT, broker.send_turn(turn)).await {
+                        Ok(Err(e)) => {
+                            tracing::warn!(error = %e, "failed to send turn to broker");
+                        }
+                        Err(_elapsed) => {
+                            tracing::warn!("broker send timed out — skipping");
+                            break;
+                        }
+                        Ok(Ok(())) => {}
                     }
                 }
             } else if let Some(ref buffered) = latest_turn {
                 // Broker disconnected — attempt late registration.
                 // CONTRACT_PTY.md §119: retain latest turn and send on
                 // successful registration.
-                match BrokerClient::connect(&session_id, child_pid.as_raw() as u32, &pattern).await
-                {
-                    Ok(mut client) => {
+                let reconnect = async {
+                    let mut client =
+                        BrokerClient::connect(&session_id, child_pid.as_raw() as u32, &pattern)
+                            .await?;
+                    client.send_turn(buffered).await?;
+                    Ok::<_, PtyError>(client)
+                };
+                match time::timeout(BROKER_IO_TIMEOUT, reconnect).await {
+                    Ok(Ok(client)) => {
                         tracing::info!("late registration — connected to broker");
-                        if let Err(e) = client.send_turn(buffered).await {
-                            tracing::warn!(error = %e, "late turn send failed");
-                        }
                         broker_client = Some(client);
                     }
-                    Err(_) => {
-                        // Still unreachable — will retry on next turn.
+                    Ok(Err(_)) | Err(_) => {
+                        // Unreachable or timed out — will retry on next turn.
                     }
                 }
             }
