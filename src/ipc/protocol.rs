@@ -44,6 +44,9 @@ pub enum Message {
         content: Vec<u8>,
         interrupted: bool,
         /// Unix epoch millis when the turn was detected by the wrapper.
+        /// Defaults to 0 when absent (v0 compat); the broker falls back
+        /// to receipt time.
+        #[serde(default)]
         timestamp: u64,
     },
 
@@ -194,6 +197,46 @@ mod tests {
             session: "abc-123".into(),
         };
         assert_eq!(round_trip(&msg), msg);
+    }
+
+    #[test]
+    fn turn_completed_v0_compat_no_timestamp() {
+        // v0 wrappers omit timestamp — field must default to 0.
+        #[derive(serde::Serialize)]
+        struct V0TurnCompleted {
+            #[serde(rename = "type")]
+            msg_type: &'static str,
+            id: u32,
+            session: String,
+            #[serde(with = "serde_bytes")]
+            content: Vec<u8>,
+            interrupted: bool,
+        }
+        let v0 = V0TurnCompleted {
+            msg_type: "turn_completed",
+            id: 5,
+            session: "s1".into(),
+            content: b"hello".to_vec(),
+            interrupted: false,
+        };
+        let encoded = rmp_serde::to_vec_named(&v0).unwrap();
+        let decoded: Message = rmp_serde::from_slice(&encoded).unwrap();
+        match decoded {
+            Message::TurnCompleted {
+                id,
+                session,
+                content,
+                interrupted,
+                timestamp,
+            } => {
+                assert_eq!(id, 5);
+                assert_eq!(session, "s1");
+                assert_eq!(content, b"hello");
+                assert!(!interrupted);
+                assert_eq!(timestamp, 0, "missing timestamp must default to 0");
+            }
+            _ => panic!("expected TurnCompleted"),
+        }
     }
 
     #[test]

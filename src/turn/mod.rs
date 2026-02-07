@@ -38,7 +38,7 @@ pub struct Turn {
 }
 
 /// Current time as Unix epoch milliseconds.
-fn epoch_millis() -> u64 {
+pub(crate) fn epoch_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before epoch")

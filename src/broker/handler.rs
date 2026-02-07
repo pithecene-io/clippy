@@ -71,8 +71,14 @@ pub fn handle_message(
             if !is_wrapper(state, connection_id) {
                 return (error_response(id, "unknown_type"), None);
             }
-            let response =
-                handle_turn_completed(state, id, &session, content, interrupted, timestamp);
+            // v0 wrappers omit timestamp (defaults to 0); fall back to
+            // broker receipt time so the ring record is never zero.
+            let ts = if timestamp == 0 {
+                crate::turn::epoch_millis()
+            } else {
+                timestamp
+            };
+            let response = handle_turn_completed(state, id, &session, content, interrupted, ts);
             (response, None)
         }
         // -- Any role --
