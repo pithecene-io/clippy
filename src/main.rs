@@ -1,5 +1,6 @@
 mod broker;
 mod cli;
+mod client;
 mod hotkey;
 mod ipc;
 mod pty;
@@ -51,6 +52,13 @@ async fn main() {
             if let Err(e) = hotkey::run(capture_key, paste_key).await {
                 tracing::error!(error = %e, "hotkey failed");
                 eprintln!("clippyd hotkey: {e}");
+                std::process::exit(1);
+            }
+        }
+        Command::Client { action } => {
+            if let Err(e) = client::run(action).await {
+                tracing::error!(error = %e, "client failed");
+                eprintln!("clippyd client: {e}");
                 std::process::exit(1);
             }
         }
