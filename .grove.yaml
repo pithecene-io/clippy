@@ -1,0 +1,7 @@
+grove:
+  intent: "Keyboard-driven agent operator tool that captures and relays terminal AI session output via global hotkeys."
+  horizon: "perennial"
+  role: "infrastructure"
+  phase: "consolidating"
+  steward: "Andrew"
+  consolidation_interval_days: 120
